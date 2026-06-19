@@ -16,13 +16,13 @@
 }
 
 .dark {
-  --background: 226 30% 8%;
+  --background: 226 34% 7%;
   --foreground: 220 24% 94%;
-  --card: 226 28% 11%;
+  --card: 226 28% 10%;
   --border: 224 18% 22%;
   --muted: 224 20% 16%;
   --muted-foreground: 220 12% 66%;
-  --primary: 178 68% 39%;
+  --primary: 178 68% 42%;
   --primary-foreground: 0 0% 100%;
   --accent: 39 88% 57%;
   --destructive: 0 72% 56%;
@@ -37,4 +37,13 @@ body {
 
 * {
   box-sizing: border-box;
+}
+
+button,
+a,
+input,
+textarea,
+select,
+video {
+  min-width: 0;
 }
