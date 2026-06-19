@@ -142,21 +142,36 @@ async def process_video(session: Session, job: Job) -> None:
                         download_url = await client.poll_download_url(dola_session, vid, raw_response_fn=record_raw_response)
                         if not download_url:
                             raise RuntimeError("Timed out waiting for video download URL.")
-                        filename = safe_filename(db_item.title or f"video-{db_item.id.hex[:8]}")
+                        filename = unique_video_filename(output_dir, vid, db_item.title)
                         raw_path = output_dir / filename.replace(".mp4", "_raw.mp4")
                         final_path = output_dir / filename
+                        save_mode = str(config.get("save_mode") or "final").lower()
                         mark_item(session_local, db_item, ItemStatus.running, f"{action_prefix}Downloading MP4")
                         await download_file(download_url, raw_path)
-                        if config.get("clean_watermark", True):
+                        artifact_path = raw_path
+                        if save_mode == "raw":
+                            final_path.unlink(missing_ok=True)
+                            item_log(f"Saved raw video only: {raw_path.name}", "success")
+                        elif config.get("clean_watermark", True):
                             mark_item(session_local, db_item, ItemStatus.running, f"{action_prefix}Cleaning watermark")
-                            if not clean_video(raw_path, final_path):
+                            if clean_video(raw_path, final_path):
+                                artifact_path = final_path
+                                if save_mode != "both":
+                                    raw_path.unlink(missing_ok=True)
+                            else:
                                 shutil.copyfile(raw_path, final_path)
+                                artifact_path = raw_path
+                                final_path.unlink(missing_ok=True)
+                                item_log("Watermark cleanup failed; kept raw video instead.", "warn")
                         else:
                             shutil.copyfile(raw_path, final_path)
-                        artifact = Artifact(job_id=job.id, item_id=db_item.id, kind="video", path=str(final_path), filename=final_path.name, mime_type="video/mp4", size_bytes=final_path.stat().st_size)
+                            artifact_path = final_path
+                            if save_mode != "both":
+                                raw_path.unlink(missing_ok=True)
+                        artifact = Artifact(job_id=job.id, item_id=db_item.id, kind="video", path=str(artifact_path), filename=artifact_path.name, mime_type="video/mp4", size_bytes=artifact_path.stat().st_size)
                         add_artifact(session_local, artifact, db_item)
-                        mark_item(session_local, db_item, ItemStatus.completed, final_path.name)
-                        item_log(f"Completed video: {final_path.name}", "success")
+                        mark_item(session_local, db_item, ItemStatus.completed, artifact_path.name)
+                        item_log(f"Completed video: {artifact_path.name}", "success")
                         return
                     except DolaSubmissionError as exc:
                         last_error = str(exc)
@@ -223,6 +238,17 @@ async def download_file(url: str, path: Path) -> None:
                 async for chunk in response.aiter_bytes():
                     if chunk:
                         handle.write(chunk)
+
+
+def unique_video_filename(output_dir: Path, vid: str, title: str = "") -> str:
+    base = safe_filename(f"{vid}-{title}" if title else vid)
+    stem = base.removesuffix(".mp4")
+    candidate = base
+    counter = 2
+    while (output_dir / candidate).exists() or (output_dir / candidate.replace(".mp4", "_raw.mp4")).exists():
+        candidate = f"{stem}-{counter}.mp4"
+        counter += 1
+    return candidate
 
 
 def main() -> None:

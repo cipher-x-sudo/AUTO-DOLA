@@ -206,6 +206,7 @@ function VideoConsole({
   const [duration, setDuration] = useState(settings.default_duration || 15)
   const [parallel, setParallel] = useState(settings.default_parallel || 30)
   const [cleanWatermark, setCleanWatermark] = useState(true)
+  const [saveMode, setSaveMode] = useState("final")
   const [submitting, setSubmitting] = useState(false)
   const [logSearch, setLogSearch] = useState("")
 
@@ -243,7 +244,7 @@ function VideoConsole({
     }
     setSubmitting(true)
     try {
-      await api.createVideoJob({ prompts, ratio, duration, parallel, save_folder: DOCKER_OUTPUT_DIR, clean_watermark: cleanWatermark })
+      await api.createVideoJob({ prompts, ratio, duration, parallel, save_folder: DOCKER_OUTPUT_DIR, clean_watermark: cleanWatermark, save_mode: saveMode })
       toast.success("Video generation queued")
       onRefresh()
     } catch (error) {
@@ -303,6 +304,8 @@ function VideoConsole({
             setParallel={setParallel}
             cleanWatermark={cleanWatermark}
             setCleanWatermark={setCleanWatermark}
+            saveMode={saveMode}
+            setSaveMode={setSaveMode}
             submitting={submitting}
             hasActiveJob={!!activeJob && ["queued", "running"].includes(activeJob.status)}
             onStart={submit}
@@ -352,6 +355,8 @@ function GenerationSettings({
   setParallel,
   cleanWatermark,
   setCleanWatermark,
+  saveMode,
+  setSaveMode,
   submitting,
   hasActiveJob,
   onStart,
@@ -365,6 +370,8 @@ function GenerationSettings({
   setParallel: (value: number) => void
   cleanWatermark: boolean
   setCleanWatermark: (value: boolean) => void
+  saveMode: string
+  setSaveMode: (value: string) => void
   submitting: boolean
   hasActiveJob: boolean
   onStart: () => void
@@ -400,6 +407,13 @@ function GenerationSettings({
           <input type="checkbox" checked={cleanWatermark} onChange={(event) => setCleanWatermark(event.target.checked)} className="h-4 w-4 accent-[hsl(var(--primary))]" />
           Clean watermark after download
         </label>
+        <Field label="Save output" className="sm:col-span-2">
+          <Select value={saveMode} onChange={(event) => setSaveMode(event.target.value)}>
+            <option value="final">Final only, raw only if cleanup fails</option>
+            <option value="raw">Raw only</option>
+            <option value="both">Both raw and final</option>
+          </Select>
+        </Field>
       </div>
       <Button className="mt-5 h-12 w-full bg-[#ff225c] text-white hover:bg-[#ff3b6f]" onClick={hasActiveJob ? onStop : onStart} disabled={submitting}>
         {submitting ? <Loader2 className="animate-spin" size={17} /> : hasActiveJob ? <Square size={15} /> : <Play size={16} />}

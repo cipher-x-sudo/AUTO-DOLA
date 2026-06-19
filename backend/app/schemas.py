@@ -17,6 +17,7 @@ class VideoJobCreate(BaseModel):
     save_folder: str = ""
     parallel: int = Field(default=5, ge=1)
     clean_watermark: bool = True
+    save_mode: str = "final"
 
 
 class ImageJobCreate(BaseModel):
