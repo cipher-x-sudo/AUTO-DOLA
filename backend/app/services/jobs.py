@@ -30,6 +30,7 @@ def log(session: Session, message: str, level: str = "info", job_id: UUID | None
 
 
 def recompute_job(session: Session, job_id: UUID) -> Job:
+    session.expire_all()
     job = session.get(Job, job_id)
     if not job:
         raise ValueError(f"Job {job_id} not found")

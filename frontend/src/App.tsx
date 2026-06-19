@@ -492,6 +492,7 @@ function isStudioLogVisible(row: LogRow) {
   const message = row.message.trim()
   if (row.level === "debug") return false
   if (message.startsWith("RAW ")) return false
+  if (message.startsWith("Could not persist RAW ")) return false
   if (message.includes("No Dola video id found yet")) return false
   return true
 }

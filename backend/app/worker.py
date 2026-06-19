@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import shutil
 from pathlib import Path
 from uuid import UUID
@@ -20,6 +21,8 @@ from app.services.jobs import add_artifact, log, mark_item, recompute_job
 from app.services.media import clean_video, safe_filename
 from app.services.settings import load_public_settings
 from app.services.tts import synthesize
+
+logger = logging.getLogger(__name__)
 
 
 def process_job(job_id: str) -> None:
@@ -96,7 +99,7 @@ async def process_video(session: Session, job: Job) -> None:
                                     body,
                                 )
                             except Exception as exc:
-                                log(session_local, f"Could not persist RAW {response_type} response metadata: {exc}", "warn", job.id)
+                                logger.warning("Could not persist Dola raw %s response metadata for job %s: %s", response_type, job.id, exc)
 
                         if not dola_session.has_auth_cookies:
                             log(session_local, "Using anonymous Dola session with fresh public cookies.", "info", job.id)
