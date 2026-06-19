@@ -21,6 +21,15 @@ C:\Users\Muhammad Huzaifa\Downloads\AUTO-DOLA
 
 Docker mounts that folder into the app as `/data/downloads`, so new MP4 outputs appear in Downloads without using a browser folder picker.
 
+To use another folder on one PC, set these values in `.env`:
+
+```powershell
+AUTO_DOLA_DOWNLOADS_DIR=E:\seedance
+AUTO_DOLA_OUTPUT_LABEL=E:\seedance
+```
+
+The app and worker still use `/data/downloads` inside Docker; Docker writes those files to the host folder from `AUTO_DOLA_DOWNLOADS_DIR`.
+
 ## Prompt Generator Gemini API
 
 Open `Prompt Generator` in the app and fill:

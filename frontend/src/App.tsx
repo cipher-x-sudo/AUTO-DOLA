@@ -25,7 +25,7 @@ import { JobTable } from "@/components/JobTable"
 import { Badge, Button, Card, Input, Progress, Select, Textarea } from "@/components/ui"
 
 const DOCKER_OUTPUT_DIR = "/data/downloads"
-const HOST_OUTPUT_LABEL = "Downloads/AUTO-DOLA"
+const HOST_OUTPUT_LABEL = import.meta.env.VITE_OUTPUT_LABEL ?? "Downloads/AUTO-DOLA"
 const GEMINI_MODELS = [
   { value: "gemini-2.5-flash-lite", label: "Gemini 3.1 Flash Lite" },
   { value: "gemini-2.5-flash-thinking", label: "Gemini 3.1 Flash Lite (Thinking)" },

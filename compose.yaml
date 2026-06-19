@@ -81,6 +81,7 @@ services:
       context: ./frontend
       args:
         VITE_API_BASE: http://localhost:8000
+        VITE_OUTPUT_LABEL: ${AUTO_DOLA_OUTPUT_LABEL:-Downloads/AUTO-DOLA}
     ports:
       - "3000:80"
     depends_on:
