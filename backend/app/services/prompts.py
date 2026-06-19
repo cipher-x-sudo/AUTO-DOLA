@@ -7,14 +7,18 @@ from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
+PROMPT_BATCH_SIZE = 5
 
-def build_prompt_system_instruction(count: int, duration: int, ratio: str, style: str) -> str:
+
+def build_prompt_system_instruction(count: int, duration: int, ratio: str, style: str, batch_number: int = 1) -> str:
     return (
         "You are an expert Seedance 2.0 video prompt engineer. "
-        f"Create exactly {count} distinct text-to-video prompts for {duration} second videos in {ratio} format. "
+        f"Create exactly {count} distinct text-to-video prompts for batch {batch_number}. "
+        f"Each prompt is for a {duration} second video in {ratio} format. "
         f"Use the style direction: {style}. "
         "Each prompt must be one complete line, vivid, cinematic, and ready to paste into a video generator. "
-        "Include subject, action, setting, camera movement, lighting, motion, realism, and quality details. "
+        "Include a specific subject, action, setting, camera movement, lighting, motion, realism, and quality details. "
+        "Make every prompt meaningfully different in action, environment, camera language, and emotional hook. "
         "Avoid numbering inside the prompt text. Avoid policy-sensitive or violent instructions. "
         "Return only valid JSON shaped like {\"prompts\":[\"...\"]}."
     )
@@ -35,6 +39,59 @@ async def generate_seedance_prompts(
     clean_base_url = normalize_gemini_base_url(base_url)
     url = f"{clean_base_url}/models/{model}:generateContent"
     headers = build_gemini_auth_headers(api_key)
+    prompts: list[str] = []
+    seen: set[str] = set()
+    batch_number = 1
+    async with httpx.AsyncClient(timeout=90) as client:
+        while len(prompts) < count:
+            remaining = count - len(prompts)
+            batch_count = min(PROMPT_BATCH_SIZE, remaining)
+            batch = await request_prompt_batch(
+                client,
+                url,
+                headers,
+                api_key,
+                master_prompt,
+                batch_count,
+                duration,
+                ratio,
+                style,
+                prompts,
+                batch_number,
+            )
+            for prompt in batch:
+                key = normalize_prompt_key(prompt)
+                if key and key not in seen:
+                    seen.add(key)
+                    prompts.append(prompt)
+                if len(prompts) >= count:
+                    break
+            if not batch:
+                raise RuntimeError(f"Gemini returned no prompts for batch {batch_number}.")
+            batch_number += 1
+            if batch_number > count + 10:
+                break
+    if not prompts:
+        raise RuntimeError("Gemini returned no prompts.")
+    if len(prompts) < count:
+        raise RuntimeError(f"Gemini returned only {len(prompts)} unique prompts out of {count} requested.")
+    return prompts[:count]
+
+
+async def request_prompt_batch(
+    client: httpx.AsyncClient,
+    url: str,
+    headers: dict[str, str],
+    api_key: str,
+    master_prompt: str,
+    count: int,
+    duration: int,
+    ratio: str,
+    style: str,
+    existing_prompts: list[str],
+    batch_number: int,
+) -> list[str]:
+    avoid_text = "\n".join(f"- {prompt}" for prompt in existing_prompts[-30:])
     payload = {
         "contents": [
             {
@@ -43,7 +100,9 @@ async def generate_seedance_prompts(
                     {
                         "text": (
                             f"Master idea: {master_prompt}\n"
-                            f"Generate {count} Seedance prompts. Duration: {duration}. Aspect ratio: {ratio}. Style: {style}."
+                            f"Generate this batch of {count} Seedance prompts. Duration: {duration}. Aspect ratio: {ratio}. Style: {style}.\n"
+                            "Do not repeat any previous wording, action, setting, camera movement, or scene concept.\n"
+                            f"Previous prompts to avoid:\n{avoid_text if avoid_text else '- none yet'}"
                         )
                     }
                 ],
@@ -53,18 +112,14 @@ async def generate_seedance_prompts(
             "temperature": 0.8,
             "responseMimeType": "application/json",
         },
-        "systemInstruction": {"parts": [{"text": build_prompt_system_instruction(count, duration, ratio, style)}]},
+        "systemInstruction": {"parts": [{"text": build_prompt_system_instruction(count, duration, ratio, style, batch_number)}]},
     }
-    async with httpx.AsyncClient(timeout=90) as client:
-        response = await client.post(url, params={"key": api_key}, headers=headers, json=payload)
+    response = await client.post(url, params={"key": api_key}, headers=headers, json=payload)
     if response.status_code >= 400:
         detail = response.text[:500] or "No response body. Check Gemini API key/token and model/host path."
         raise RuntimeError(f"Gemini API returned HTTP {response.status_code}: {detail}")
     text = extract_gemini_text(response.json())
-    prompts = parse_prompt_response(text)
-    if not prompts:
-        raise RuntimeError("Gemini returned no prompts.")
-    return prompts[:count]
+    return parse_prompt_response(text)[:count]
 
 
 def normalize_gemini_base_url(base_url: str) -> str:
@@ -127,3 +182,7 @@ def parse_prompt_response(text: str) -> list[str]:
         if prompt:
             prompts.append(prompt)
     return prompts
+
+
+def normalize_prompt_key(prompt: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", prompt.lower()).strip()

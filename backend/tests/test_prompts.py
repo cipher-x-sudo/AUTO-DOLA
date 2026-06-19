@@ -1,3 +1,4 @@
+import httpx
 import pytest
 
 from app.services.prompts import build_gemini_auth_headers, extract_gemini_text, generate_seedance_prompts, normalize_gemini_base_url, parse_prompt_response
@@ -45,3 +46,33 @@ def test_build_gemini_auth_headers_supports_local_proxy_auth_styles() -> None:
 async def test_generate_prompts_requires_key() -> None:
     with pytest.raises(ValueError, match="API key"):
         await generate_seedance_prompts("car", 2, 15, "9:16", "cinematic", "", "https://example.test", "gemini")
+
+
+@pytest.mark.asyncio
+async def test_generate_prompts_requests_in_batches_of_five(monkeypatch: pytest.MonkeyPatch) -> None:
+    requested_batch_sizes: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = request.read().decode()
+        if "batch of 5" in body:
+            batch_size = 5
+        elif "batch of 2" in body:
+            batch_size = 2
+        else:
+            batch_size = 0
+        requested_batch_sizes.append(batch_size)
+        start = sum(requested_batch_sizes[:-1])
+        prompts = [f"unique cinematic prompt {index}" for index in range(start + 1, start + batch_size + 1)]
+        return httpx.Response(200, json={"candidates": [{"content": {"parts": [{"text": f'{{"prompts":{prompts!r}}}'.replace("'", '"')}]}}]})
+
+    original_client = httpx.AsyncClient
+
+    def mock_client(*args: object, **kwargs: object) -> httpx.AsyncClient:
+        return original_client(transport=httpx.MockTransport(handler), timeout=kwargs.get("timeout"))
+
+    monkeypatch.setattr(httpx, "AsyncClient", mock_client)
+
+    prompts = await generate_seedance_prompts("parrot", 12, 15, "9:16", "cinematic", "token", "https://example.test/v1beta", "gemini")
+
+    assert requested_batch_sizes == [5, 5, 2]
+    assert len(prompts) == 12
