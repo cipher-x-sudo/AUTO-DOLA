@@ -8,6 +8,7 @@ from httpx import Response
 from app.services.dola import (
     ANDROID_WEBVIEW_UA,
     DolaClient,
+    DolaSession,
     DolaSubmissionError,
     PAYLOAD_TEMPLATE_VERSION,
     base_payload,
@@ -183,6 +184,68 @@ async def test_high_demand_is_retryable_message(monkeypatch: pytest.MonkeyPatch)
 def test_parse_conversation_from_stream() -> None:
     text = 'data: {"conversation_id":"12345","conversation_info":{"conversation_type":3}}'
     assert parse_conversation_from_stream(text) == ("12345", 3)
+
+
+def test_parse_submit_response_includes_assistant_messages() -> None:
+    payload = build_dola_payload(base_payload("verify_test"), "Sidra dancing", 15, "9:16")
+    response_text = "\n".join(
+        [
+            'data: {"message":{"content":"[{\\"content\\":{\\"text_block\\":{\\"text\\":\\"I will create a vertical video of Sidra dancing for you.\\"}}}]"},"conversation_id":"12345","conversation_info":{"conversation_type":3}}',
+            'data: {"message":{"content":"[{\\"content\\":{\\"text_block\\":{\\"text\\":\\"The video will be generated using the **Dreamina Seedance 2.0 model**. It will use 3 points and be ready in 1-3 minute.\\"}}}]"}}',
+        ]
+    )
+
+    result = parse_submit_response(
+        DolaSession(
+            url="https://www.dola.com/chat/completion?fp=verify_test&web_platform=web",
+            headers={"cookie": "i18next=en; flow_user_country=BD; s_v_web_id=verify_test; ttwid=fresh"},
+            payload_template={},
+            fp="verify_test",
+            has_ttwid=True,
+            has_hook_slardar=False,
+            has_auth_cookies=False,
+        ),
+        payload,
+        Response(200, text=response_text),
+    )
+
+    assert result.conversation_id == "12345"
+    assert result.conversation_type == 3
+    assert result.assistant_messages == [
+        "I will create a vertical video of Sidra dancing for you.",
+        "The video will be generated using the **Dreamina Seedance 2.0 model**. It will use 3 points and be ready in 1-3 minute.",
+    ]
+
+
+def test_parse_assistant_messages_redacts_urls() -> None:
+    text = 'data: {"message":{"content":"[{\\"content\\":{\\"text_block\\":{\\"text\\":\\"Download at https://secret.example/signed?token=abc\\"}}}]"}}'
+
+    assert parse_assistant_messages_from_stream(text) == ["Download at [redacted-url]"]
+
+
+def test_extract_chain_texts_from_nested_message() -> None:
+    payload = {
+        "code": 0,
+        "data": {
+            "messages": [
+                {
+                    "content": json.dumps(
+                        [
+                            {
+                                "content": {
+                                    "text_block": {
+                                        "text": "Processing video request (attempt 1/250)...",
+                                    }
+                                }
+                            }
+                        ]
+                    )
+                }
+            ]
+        },
+    }
+
+    assert extract_chain_texts(payload) == ["Processing video request (attempt 1/250)..."]
 
 
 def test_parse_conversation_errors() -> None:
