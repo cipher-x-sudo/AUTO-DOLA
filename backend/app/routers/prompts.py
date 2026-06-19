@@ -2,8 +2,15 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session
 
 from app.database import get_session
-from app.schemas import NichePromptGenerateRequest, NichePromptGenerateResponse, PromptGenerateRequest, PromptGenerateResponse
-from app.services.niches import generate_for_niches
+from app.schemas import (
+    NichePromptGenerateRequest,
+    NichePromptGenerateResponse,
+    NichePromptSaveRequest,
+    NichePromptSaveResponse,
+    PromptGenerateRequest,
+    PromptGenerateResponse,
+)
+from app.services.niches import generate_for_niches, save_niche_prompt_group
 from app.services.prompts import generate_seedance_prompts
 from app.services.settings import load_public_settings
 
@@ -43,7 +50,18 @@ async def generate_niche_prompts(payload: NichePromptGenerateRequest, session: S
             app_settings.get("gemini_api_key", ""),
             app_settings.get("gemini_base_url", ""),
             model,
+            existing_prompts=payload.existing_prompts,
+            save=payload.save,
         )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return NichePromptGenerateResponse(groups=groups, model=model)
+
+
+@router.post("/save-niche-prompts", response_model=NichePromptSaveResponse)
+async def save_niche_prompts(payload: NichePromptSaveRequest) -> NichePromptSaveResponse:
+    try:
+        saved_path = save_niche_prompt_group(payload.niche_id, payload.prompts)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return NichePromptSaveResponse(saved_path=str(saved_path))

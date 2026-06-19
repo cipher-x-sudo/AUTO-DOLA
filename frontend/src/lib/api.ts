@@ -33,6 +33,8 @@ export const api = {
   niches: () => request<Niche[]>("/api/niches"),
   generateNichePrompts: (payload: unknown) =>
     request<{ groups: NichePromptGroup[]; model: string }>("/api/prompts/generate-niches", { method: "POST", body: JSON.stringify(payload) }),
+  saveNichePrompts: (payload: unknown) =>
+    request<{ saved_path: string }>("/api/prompts/save-niche-prompts", { method: "POST", body: JSON.stringify(payload) }),
 }
 
 export function artifactUrl(id: string) {

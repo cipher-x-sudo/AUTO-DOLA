@@ -97,6 +97,8 @@ async def generate_for_niches(
     *,
     niches_dir: Path | None = None,
     output_dir: Path | None = None,
+    existing_prompts: list[str] | None = None,
+    save: bool = True,
 ) -> list[dict]:
     niches = resolve_niches(niche_ids, niches_dir)
     if count_mode not in {"global", "per_niche"}:
@@ -107,8 +109,11 @@ async def generate_for_niches(
         if prompt_count <= 0:
             continue
         master_prompt = niche.path.read_text(encoding="utf-8")
+        if existing_prompts:
+            avoid = "\n".join(f"{index + 1}. {prompt}" for index, prompt in enumerate(existing_prompts[-80:]))
+            master_prompt = f"{master_prompt}\n\nAlready generated prompts. Do not repeat concepts, wording, camera moves, subjects, or settings:\n{avoid}"
         prompts = await generate_seedance_prompts(master_prompt, prompt_count, duration, "9:16", style, api_key, base_url, model)
-        saved_path = save_generated_prompts(niche, prompts, output_dir)
+        saved_path = save_generated_prompts(niche, prompts, output_dir) if save else None
         groups.append(
             {
                 "niche_id": niche.id,
@@ -116,7 +121,12 @@ async def generate_for_niches(
                 "filename": niche.filename,
                 "requested_count": prompt_count,
                 "prompts": prompts,
-                "saved_path": str(saved_path),
+                "saved_path": str(saved_path) if saved_path else "",
             }
         )
     return groups
+
+
+def save_niche_prompt_group(niche_id: str, prompts: list[str], *, niches_dir: Path | None = None, output_dir: Path | None = None) -> Path:
+    niche = resolve_niches([niche_id], niches_dir)[0]
+    return save_generated_prompts(niche, prompts, output_dir)

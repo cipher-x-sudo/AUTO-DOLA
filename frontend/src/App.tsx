@@ -763,19 +763,68 @@ function PromptGenerator({
       for (let index = 0; index < selectedNiches.length; index += 1) {
         const niche = selectedNiches[index]
         const promptCount = counts[index]
+        const nichePrompts: string[] = []
+        const seen = new Set<string>()
+        let batchNumber = 1
         setCurrentProgressLabel(`${niche.name}: 0/${promptCount}`)
-        const result = await api.generateNichePrompts({
-          niche_ids: [niche.id],
-          count: promptCount,
-          count_mode: "per_niche",
-          duration,
-          style: "cinematic realistic",
-        })
-        resultModel = result.model
-        const group = result.groups[0]
-        if (group) {
-          setGeneratedGroups((current) => [...current, group])
-          setCurrentProgressLabel(`${niche.name}: ${group.prompts.length}/${promptCount}`)
+        setGeneratedGroups((current) => upsertPromptGroup(current, {
+          niche_id: niche.id,
+          niche_name: niche.name,
+          filename: niche.filename,
+          requested_count: promptCount,
+          prompts: [],
+          saved_path: "",
+        }))
+        while (nichePrompts.length < promptCount) {
+          const remaining = promptCount - nichePrompts.length
+          const batchCount = Math.min(PROMPT_UI_BATCH_SIZE, remaining)
+          setCurrentProgressLabel(`${niche.name}: ${nichePrompts.length}/${promptCount} - batch ${batchNumber}`)
+          const result = await api.generateNichePrompts({
+            niche_ids: [niche.id],
+            count: batchCount,
+            count_mode: "per_niche",
+            duration,
+            style: "cinematic realistic",
+            existing_prompts: nichePrompts,
+            save: false,
+          })
+          resultModel = result.model
+          const group = result.groups[0]
+          let added = 0
+          for (const prompt of group?.prompts ?? []) {
+            const key = prompt.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim()
+            if (key && !seen.has(key)) {
+              seen.add(key)
+              nichePrompts.push(prompt)
+              added += 1
+            }
+            if (nichePrompts.length >= promptCount) break
+          }
+          if (!added) {
+            throw new Error(`${niche.name}: Gemini returned no new unique prompts in batch ${batchNumber}.`)
+          }
+          setGeneratedGroups((current) => upsertPromptGroup(current, {
+            niche_id: niche.id,
+            niche_name: niche.name,
+            filename: niche.filename,
+            requested_count: promptCount,
+            prompts: [...nichePrompts],
+            saved_path: "",
+          }))
+          setCurrentProgressLabel(`${niche.name}: ${nichePrompts.length}/${promptCount}`)
+          batchNumber += 1
+        }
+        const saved = await api.saveNichePrompts({ niche_id: niche.id, prompts: nichePrompts })
+        setGeneratedGroups((current) => upsertPromptGroup(current, {
+          niche_id: niche.id,
+          niche_name: niche.name,
+          filename: niche.filename,
+          requested_count: promptCount,
+          prompts: [...nichePrompts],
+          saved_path: saved.saved_path,
+        }))
+        if (index + 1 < selectedNiches.length) {
+          setCurrentProgressLabel(`${niche.name}: saved ${nichePrompts.length}/${promptCount}`)
         }
       }
       toast.success(`Generated niche prompts with ${resultModel}`)
@@ -1123,6 +1172,14 @@ function splitPromptCount(total: number, parts: number) {
     counts[index] += 1
   }
   return counts
+}
+
+function upsertPromptGroup(groups: NichePromptGroup[], next: NichePromptGroup) {
+  const index = groups.findIndex((group) => group.niche_id === next.niche_id)
+  if (index === -1) return [...groups, next]
+  const copy = [...groups]
+  copy[index] = next
+  return copy
 }
 
 function collectVideoArtifacts(jobs: Job[]): VideoArtifact[] {

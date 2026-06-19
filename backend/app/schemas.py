@@ -114,6 +114,8 @@ class NichePromptGenerateRequest(BaseModel):
     count_mode: str = "global"
     duration: int = Field(default=15, ge=5, le=60)
     style: str = "cinematic realistic"
+    existing_prompts: list[str] = []
+    save: bool = True
 
 
 class NichePromptGroup(BaseModel):
@@ -128,6 +130,15 @@ class NichePromptGroup(BaseModel):
 class NichePromptGenerateResponse(BaseModel):
     groups: list[NichePromptGroup]
     model: str
+
+
+class NichePromptSaveRequest(BaseModel):
+    niche_id: str = Field(min_length=1)
+    prompts: list[str] = Field(min_length=1)
+
+
+class NichePromptSaveResponse(BaseModel):
+    saved_path: str
 
 
 class HealthRead(BaseModel):
