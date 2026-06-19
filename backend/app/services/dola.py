@@ -36,7 +36,10 @@ class DolaClient:
             f"&region={self.region}&samantha_web=1&sys_region={self.region}&tea_uuid={tea_uuid}"
             f"&use-olympus-account=1&version_code=20800&web_id={tea_uuid}&web_tab_id={web_tab_id}"
         )
+        ttwid = await self._fetch_ttwid()
         cookies = ["i18next=en", f"flow_user_country={self.region}", f"s_v_web_id={fp}"]
+        if ttwid:
+            cookies.append(f"ttwid={ttwid}")
         if self.auth_cookies:
             cookies.append(self.auth_cookies)
         headers = {
@@ -50,6 +53,19 @@ class DolaClient:
             "sec-ch-ua-platform": '"Android"',
         }
         return DolaSession(url=url, headers=headers, payload_template=base_payload())
+
+    async def _fetch_ttwid(self) -> str | None:
+        try:
+            async with httpx.AsyncClient(timeout=10, verify=False) as client:
+                response = await client.get("https://www.dola.com/")
+                for cookie_header in response.headers.get_list("set-cookie"):
+                    if "ttwid=" in cookie_header:
+                        match = re.match(r"ttwid=([^;]+)", cookie_header)
+                        if match:
+                            return match.group(1)
+        except Exception:
+            pass
+        return None
 
     async def submit(self, session: DolaSession, payload: dict[str, Any]) -> tuple[str, int]:
         async with httpx.AsyncClient(timeout=self.timeout, verify=False) as client:

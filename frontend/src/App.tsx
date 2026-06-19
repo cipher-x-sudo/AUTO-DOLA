@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react"
 import { toast } from "sonner"
-import { api } from "@/lib/api"
+import { api, subscribeJobEvents } from "@/lib/api"
 import type { Job, SettingsPayload } from "@/lib/types"
 import { Layout } from "@/components/Layout"
 import { JobTable } from "@/components/JobTable"
@@ -40,6 +40,19 @@ export default function App() {
     const id = setInterval(refresh, 6000)
     return () => clearInterval(id)
   }, [])
+
+  useEffect(() => {
+    const runningJobs = jobs.filter((j) => j.status === "running")
+    if (!runningJobs.length) return
+    const cleanups = runningJobs.map((job) =>
+      subscribeJobEvents(
+        job.id,
+        () => refresh(),
+        () => {},
+      ),
+    )
+    return () => cleanups.forEach((c) => c())
+  }, [jobs.filter((j) => j.status === "running").map((j) => j.id).join(",")])
 
   const content = useMemo(() => {
     if (page === "video") return <VideoStudio settings={settings} onCreated={refresh} />

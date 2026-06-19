@@ -33,3 +33,21 @@ export const api = {
 export function artifactUrl(id: string) {
   return `${API_BASE}/api/artifacts/${id}/download`
 }
+
+export function subscribeJobEvents(
+  jobId: string,
+  onMessage: (event: { type: string; level?: string; message?: string; [key: string]: unknown }) => void,
+  onError?: () => void,
+): () => void {
+  const source = new EventSource(`${API_BASE}/api/video/jobs/${jobId}/events`)
+  source.onmessage = (e) => {
+    try {
+      onMessage(JSON.parse(e.data))
+    } catch {}
+  }
+  source.onerror = () => {
+    onError?.()
+    source.close()
+  }
+  return () => source.close()
+}
