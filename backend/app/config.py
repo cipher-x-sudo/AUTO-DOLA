@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     dola_auth_cookies: str = ""
     dola_default_region: str = "BD"
     yousmind_api_key: str = ""
+    gemini_api_key: str = ""
+    gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
+    gemini_model: str = "gemini-2.5-flash"
     tts_default_voice: str = "en-US-AriaNeural"
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")

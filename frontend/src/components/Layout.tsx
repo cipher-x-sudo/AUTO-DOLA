@@ -1,9 +1,10 @@
-import { FileVideo, History, Loader2, Moon, Sparkles } from "lucide-react"
+import { FileVideo, History, Loader2, Moon, Sparkles, Wand2 } from "lucide-react"
 import { Button } from "./ui"
 
 const nav = [
-  ["video", FileVideo, "Video Studio"],
-  ["history", History, "History"],
+  ["video", "/video", FileVideo, "Video Studio"],
+  ["prompts", "/prompt-generator", Wand2, "Prompt Generator"],
+  ["history", "/history", History, "History"],
 ] as const
 
 export function Layout({ page, setPage, loading, children }: { page: string; setPage: (page: string) => void; loading?: boolean; children: React.ReactNode }) {
@@ -22,17 +23,21 @@ export function Layout({ page, setPage, loading, children }: { page: string; set
           </div>
 
           <nav className="flex min-w-0 gap-2 overflow-x-auto pb-1 lg:pb-0">
-            {nav.map(([id, Icon, label]) => (
-              <button
+            {nav.map(([id, href, Icon, label]) => (
+              <a
                 key={id}
-                onClick={() => setPage(id)}
+                href={href}
+                onClick={(event) => {
+                  event.preventDefault()
+                  setPage(id)
+                }}
                 className={`inline-flex h-9 shrink-0 items-center gap-2 rounded-md px-3 text-xs font-black uppercase tracking-wide transition ${
                   page === id ? "bg-primary text-primary-foreground shadow-lg shadow-primary/20" : "bg-muted/45 text-muted-foreground hover:bg-muted hover:text-foreground"
                 }`}
               >
                 <Icon size={15} />
                 {label}
-              </button>
+              </a>
             ))}
           </nav>
 

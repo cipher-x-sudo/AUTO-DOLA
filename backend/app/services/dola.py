@@ -32,14 +32,23 @@ VIDEO_FAILURE_MARKERS = (
     "generation failed",
     "unable to generate",
     "cannot generate",
+    "can't generate",
+    "cant generate",
     "couldn't generate",
     "could not generate",
+    "content you requested",
     "no points",
     "insufficient points",
     "high demand",
     "rate limit",
     "limit reached",
     "try again later",
+    "may violate our policies",
+    "violate our policies",
+    "violates our policies",
+    "policy violation",
+    "modify it and try again",
+    "input contains content",
     "safety policy",
     "content policy",
     "violates",
@@ -70,6 +79,10 @@ class DolaSubmissionError(RuntimeError):
     def __init__(self, message: str, diagnostic: dict[str, Any]) -> None:
         super().__init__(message)
         self.diagnostic = diagnostic
+
+
+class DolaTerminalGenerationError(RuntimeError):
+    """A non-retryable Dola response for a specific prompt."""
 
 
 class DolaClient:
@@ -201,7 +214,7 @@ class DolaClient:
                                 level = "warn" if is_terminal_video_failure(message) else "info"
                                 log_fn(message[:500], level)
                         if is_terminal_video_failure(message):
-                            raise RuntimeError(f"Dola did not continue video generation: {message[:500]}")
+                            raise DolaTerminalGenerationError(f"Dola rejected this prompt: {message[:500]}")
                 elif log_fn and attempt == 1:
                     log_fn(f"Dola chain poll returned HTTP {response.status_code}.", "warn")
                 await asyncio.sleep(sleep_seconds)
@@ -741,7 +754,7 @@ def _extract_text_values(value: Any) -> list[str]:
 
 
 def is_terminal_video_failure(text: str) -> bool:
-    lowered = text.lower()
+    lowered = text.lower().replace("’", "'")
     return any(marker in lowered for marker in VIDEO_FAILURE_MARKERS)
 
 

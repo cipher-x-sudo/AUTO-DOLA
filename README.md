@@ -13,6 +13,24 @@ Open `http://localhost:3000`.
 
 The backend API runs on `http://localhost:8000`.
 
+Generated videos are written directly to your host Downloads folder through Docker. By default, `.env.example` points `AUTO_DOLA_DOWNLOADS_DIR` at:
+
+```powershell
+C:\Users\Muhammad Huzaifa\Downloads\AUTO-DOLA
+```
+
+Docker mounts that folder into the app as `/data/downloads`, so new MP4 outputs appear in Downloads without using a browser folder picker.
+
+## Prompt Generator Gemini API
+
+Open `Prompt Generator` in the app and fill:
+
+- `Gemini API key`
+- `Gemini API host`, for example `localhost:8045` or `https://generativelanguage.googleapis.com/v1beta`
+- `Gemini model`, default `gemini-2.5-flash`
+
+Click `Save API Configuration`, then generate prompts. If you enter `localhost:8045`, AUTO-DOLA automatically calls it as `http://localhost:8045`. These settings are stored in the app settings table using the existing encryption layer. You can also set `GEMINI_API_KEY`, `GEMINI_BASE_URL`, and `GEMINI_MODEL` in `.env`.
+
 ## Dola Video Sessions
 
 AUTO-DOLA builds a fresh Dola web session for every video item. It fetches public Dola cookies such as `ttwid` automatically, then optionally merges user-owned auth cookies if you provide them locally.

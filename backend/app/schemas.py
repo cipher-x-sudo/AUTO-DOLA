@@ -71,6 +71,9 @@ class JobRead(BaseModel):
 class SettingsPayload(BaseModel):
     dola_auth_cookies: str = ""
     yousmind_api_key: str = ""
+    gemini_api_key: str = ""
+    gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
+    gemini_model: str = "gemini-2.5-flash"
     default_ratio: str = "9:16"
     default_duration: int = 15
     default_parallel: int = 5
@@ -82,6 +85,19 @@ class SettingsPayload(BaseModel):
 
 class ProxyTestRequest(BaseModel):
     proxy_url: str
+
+
+class PromptGenerateRequest(BaseModel):
+    master_prompt: str = Field(min_length=1)
+    count: int = Field(default=5, ge=1, le=50)
+    duration: int = Field(default=15, ge=5, le=60)
+    ratio: str = "9:16"
+    style: str = "cinematic realistic"
+
+
+class PromptGenerateResponse(BaseModel):
+    prompts: list[str]
+    model: str
 
 
 class HealthRead(BaseModel):

@@ -14,7 +14,7 @@ from app.config import settings
 from app.database import engine, init_db
 from app.models import Artifact, ItemStatus, Job, JobItem, JobKind, JobStatus, utcnow
 from app.services.cookie_snapshots import append_raw_response_event, create_cookie_snapshot, mark_cookie_snapshot_conversation
-from app.services.dola import DolaClient, DolaSubmissionError, build_dola_payload, format_diagnostic
+from app.services.dola import DolaClient, DolaSubmissionError, DolaTerminalGenerationError, build_dola_payload, format_diagnostic, is_terminal_video_failure
 from app.services.images import generate_image
 from app.services.jobs import add_artifact, log, mark_item, recompute_job
 from app.services.media import clean_video, safe_filename
@@ -73,6 +73,10 @@ async def process_video(session: Session, job: Job) -> None:
                     mark_item(session_local, db_item or item, ItemStatus.cancelled, "Cancelled")
                     return
                 last_error = ""
+                def job_cancelled_or_missing() -> bool:
+                    current_job = session_local.get(Job, job.id)
+                    return current_job is None or current_job.status == JobStatus.cancelled
+
                 for attempt in range(1, max_retries + 1):
                     try:
                         action_prefix = f"[{attempt}/{max_retries}] " if max_retries > 1 else ""
@@ -110,6 +114,9 @@ async def process_video(session: Session, job: Job) -> None:
                             job.id,
                         )
                         for assistant_message in submit_result.assistant_messages:
+                            if is_terminal_video_failure(assistant_message):
+                                log(session_local, f"Dola: {assistant_message}", "warn", job.id)
+                                raise DolaTerminalGenerationError(f"Dola rejected this prompt: {assistant_message[:500]}")
                             log(session_local, f"Dola: {assistant_message}", "info", job.id)
                         mark_item(session_local, db_item, ItemStatus.running, f"{action_prefix}Processing video request")
                         vid = await client.poll_video_id(
@@ -118,10 +125,12 @@ async def process_video(session: Session, job: Job) -> None:
                             conversation_type,
                             log_fn=lambda message, level: log(session_local, f"Dola: {message}", level, job.id),
                             raw_response_fn=record_raw_response,
-                            cancel_fn=lambda: (session_local.get(Job, job.id) or job).status == JobStatus.cancelled,
+                            cancel_fn=job_cancelled_or_missing,
                         )
-                        if (session_local.get(Job, job.id) or job).status == JobStatus.cancelled:
-                            mark_item(session_local, db_item, ItemStatus.cancelled, "Cancelled")
+                        if job_cancelled_or_missing():
+                            current_item = session_local.get(JobItem, db_item.id)
+                            if current_item:
+                                mark_item(session_local, current_item, ItemStatus.cancelled, "Cancelled")
                             return
                         if not vid:
                             raise RuntimeError("Timed out waiting for Dola video id.")
@@ -151,6 +160,11 @@ async def process_video(session: Session, job: Job) -> None:
                         if attempt < max_retries:
                             log(session_local, f"Attempt {attempt} failed for '{db_item.prompt[:40]}': {exc}. Retrying...", "warn", job.id)
                             await asyncio.sleep(3)
+                    except DolaTerminalGenerationError as exc:
+                        last_error = str(exc)
+                        mark_item(session_local, db_item, ItemStatus.failed, "Prompt flagged", last_error)
+                        log(session_local, last_error, "error", job.id)
+                        return
                     except Exception as exc:
                         last_error = str(exc)
                         if attempt < max_retries:

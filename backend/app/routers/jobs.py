@@ -6,13 +6,14 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 from fastapi.responses import StreamingResponse
+from sqlalchemy import delete
 from sqlalchemy.orm import selectinload
 from sqlmodel import Session, select
 
 from app.database import get_session
 from app.config import settings
 from app.events import hub, job_channel
-from app.models import Job, JobItem, JobKind, JobStatus, LogEvent, utcnow
+from app.models import Artifact, Job, JobItem, JobKind, JobStatus, LogEvent, utcnow
 from app.queue import enqueue_job
 from app.schemas import JobRead, VideoJobCreate
 from app.services.cookie_snapshots import list_cookie_snapshot_metadata, read_cookie_snapshot, redact_cookie_snapshot_payload
@@ -38,6 +39,19 @@ def create_video_job(payload: VideoJobCreate, session: Session = Depends(get_ses
 @router.get("/jobs", response_model=list[JobRead])
 def list_jobs(session: Session = Depends(get_session)) -> list[Job]:
     return session.exec(select(Job).where(Job.kind == JobKind.video).options(selectinload(Job.items), selectinload(Job.artifacts)).order_by(Job.created_at.desc()).limit(100)).all()
+
+
+@router.delete("/jobs")
+def clear_jobs(session: Session = Depends(get_session)) -> dict[str, int]:
+    job_ids = list(session.exec(select(Job.id).where(Job.kind == JobKind.video)).all())
+    if not job_ids:
+        return {"deleted": 0}
+    session.exec(delete(Artifact).where(Artifact.job_id.in_(job_ids)))  # type: ignore[arg-type]
+    session.exec(delete(JobItem).where(JobItem.job_id.in_(job_ids)))  # type: ignore[arg-type]
+    session.exec(delete(LogEvent).where(LogEvent.job_id.in_(job_ids)))  # type: ignore[arg-type]
+    session.exec(delete(Job).where(Job.id.in_(job_ids)))  # type: ignore[arg-type]
+    session.commit()
+    return {"deleted": len(job_ids)}
 
 
 @router.get("/jobs/{job_id}/dola-cookie-snapshots")

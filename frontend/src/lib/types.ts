@@ -39,6 +39,9 @@ export interface Job {
 export interface SettingsPayload {
   dola_auth_cookies: string
   yousmind_api_key: string
+  gemini_api_key: string
+  gemini_base_url: string
+  gemini_model: string
   default_ratio: string
   default_duration: number
   default_parallel: number

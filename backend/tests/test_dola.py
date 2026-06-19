@@ -25,6 +25,7 @@ from app.services.dola import (
     parse_vid,
     parse_vid_with_diagnostics,
     extract_chain_texts,
+    is_terminal_video_failure,
     read_auth_cookies,
 )
 from app.services.raw_responses import split_response_body
@@ -321,6 +322,24 @@ def test_parse_vid_reports_checked_paths_when_missing() -> None:
     assert "data.pull_singe_chain_uplink_body.messages" in checked_paths
     assert "downlink_body.pull_singe_chain_downlink_body.messages" in checked_paths
     assert "recursive JSON/string scan" in checked_paths
+
+
+def test_policy_rejection_message_is_terminal_failure() -> None:
+    message = "The video can't be generated because your input contains content that may violate our policies. Modify it and try again."
+
+    assert is_terminal_video_failure(message) is True
+
+
+def test_cannot_generate_requested_content_is_terminal_failure() -> None:
+    message = "I can't generate the content you requested. Try something else."
+
+    assert is_terminal_video_failure(message) is True
+
+
+def test_curly_apostrophe_rejection_is_terminal_failure() -> None:
+    message = "I can’t generate the content you requested. Try something else."
+
+    assert is_terminal_video_failure(message) is True
 
 
 def test_raw_response_chunking_preserves_original_body() -> None:

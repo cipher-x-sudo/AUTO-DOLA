@@ -1,19 +1,20 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react"
 import {
+  Check,
+  Copy,
   Download,
   FileText,
   FileVideo,
   Folder,
-  FolderOpen,
   Loader2,
   Play,
-  RefreshCw,
   Search,
   Settings2,
   Square,
   Terminal,
   Trash2,
   Upload,
+  Wand2,
   Zap,
 } from "lucide-react"
 import { toast } from "sonner"
@@ -23,9 +24,28 @@ import { Layout } from "@/components/Layout"
 import { JobTable } from "@/components/JobTable"
 import { Badge, Button, Card, Input, Progress, Select, Textarea } from "@/components/ui"
 
+const DOCKER_OUTPUT_DIR = "/data/downloads"
+const HOST_OUTPUT_LABEL = "Downloads/AUTO-DOLA"
+const GEMINI_MODELS = [
+  { value: "gemini-2.5-flash-lite", label: "Gemini 3.1 Flash Lite" },
+  { value: "gemini-2.5-flash-thinking", label: "Gemini 3.1 Flash Lite (Thinking)" },
+  { value: "gemini-3.5-flash-extra-low", label: "Gemini 3.5 Flash (Low)" },
+  { value: "gemini-3.5-flash-low", label: "Gemini 3.5 Flash (Medium)" },
+  { value: "gemini-2.5-pro", label: "Gemini 2.5 Pro" },
+  { value: "gemini-3.1-flash-lite", label: "Gemini 3.1 Flash Lite (3.1)" },
+  { value: "gemini-3.1-pro-low", label: "Gemini 3.1 Pro (Low)" },
+  { value: "gemini-2.5-flash", label: "Gemini 3.1 Flash Lite (Recommended)" },
+  { value: "gemini-3-flash", label: "Gemini 3 Flash" },
+  { value: "gemini-3-flash-agent", label: "Gemini 3.5 Flash (High)" },
+  { value: "gemini-3.1-pro-high", label: "Gemini 3.1 Pro (High)" },
+] as const
+
 const emptySettings: SettingsPayload = {
   dola_auth_cookies: "",
   yousmind_api_key: "",
+  gemini_api_key: "",
+  gemini_base_url: "https://generativelanguage.googleapis.com/v1beta",
+  gemini_model: "gemini-2.5-flash",
   default_ratio: "9:16",
   default_duration: 15,
   default_parallel: 5,
@@ -35,7 +55,19 @@ const emptySettings: SettingsPayload = {
   tts_default_voice: "en-US-AriaNeural",
 }
 
-type Page = "video" | "history"
+type Page = "video" | "prompts" | "history"
+
+const pageRoutes: Record<Page, string> = {
+  video: "/video",
+  prompts: "/prompt-generator",
+  history: "/history",
+}
+
+function pageFromPath(pathname: string): Page {
+  if (pathname === "/prompt-generator" || pathname === "/prompts") return "prompts"
+  if (pathname === "/history") return "history"
+  return "video"
+}
 
 interface LogRow {
   id: string
@@ -51,14 +83,37 @@ interface VideoArtifact {
 }
 
 export default function App() {
-  const [page, setPage] = useState<Page>("video")
+  const [page, setPage] = useState<Page>(() => pageFromPath(window.location.pathname))
   const [jobs, setJobs] = useState<Job[]>([])
   const [settings, setSettings] = useState<SettingsPayload>(emptySettings)
   const [logs, setLogs] = useState<LogRow[]>([])
   const [loading, setLoading] = useState(true)
+  const [studioPromptText, setStudioPromptText] = useState("")
 
   useEffect(() => {
     document.documentElement.classList.add("dark")
+  }, [])
+
+  useEffect(() => {
+    const normalizedPath = pageRoutes[pageFromPath(window.location.pathname)]
+    if (window.location.pathname !== normalizedPath) {
+      window.history.replaceState({}, "", normalizedPath)
+    }
+
+    function handlePopState() {
+      setPage(pageFromPath(window.location.pathname))
+    }
+
+    window.addEventListener("popstate", handlePopState)
+    return () => window.removeEventListener("popstate", handlePopState)
+  }, [])
+
+  const navigate = useCallback((nextPage: Page) => {
+    setPage(nextPage)
+    const nextPath = pageRoutes[nextPage]
+    if (window.location.pathname !== nextPath) {
+      window.history.pushState({}, "", nextPath)
+    }
   }, [])
 
   const refresh = useCallback(async () => {
@@ -101,9 +156,27 @@ export default function App() {
   const videos = useMemo(() => collectVideoArtifacts(jobs), [jobs])
 
   return (
-    <Layout page={page} setPage={(next) => setPage(next as Page)} loading={loading}>
-      {page === "video" && <VideoConsole settings={settings} jobs={jobs} activeJob={activeJob} videos={videos} logs={recentLogs} onRefresh={refresh} />}
-      {page === "history" && <History jobs={jobs} />}
+    <Layout page={page} setPage={(next) => navigate(next as Page)} loading={loading}>
+      {page === "video" && (
+        <VideoConsole
+          settings={settings}
+          jobs={jobs}
+          activeJob={activeJob}
+          videos={videos}
+          logs={recentLogs}
+          promptText={studioPromptText}
+          setPromptText={setStudioPromptText}
+          onRefresh={refresh}
+        />
+      )}
+      {page === "prompts" && (
+        <PromptGenerator
+          settings={settings}
+          onSettingsSaved={setSettings}
+          onUsePrompts={(text) => { setStudioPromptText(text); navigate("video") }}
+        />
+      )}
+      {page === "history" && <History jobs={jobs} onRefresh={refresh} />}
     </Layout>
   )
 }
@@ -114,6 +187,8 @@ function VideoConsole({
   activeJob,
   videos,
   logs,
+  promptText,
+  setPromptText,
   onRefresh,
 }: {
   settings: SettingsPayload
@@ -121,13 +196,13 @@ function VideoConsole({
   activeJob?: Job
   videos: VideoArtifact[]
   logs: LogRow[]
+  promptText: string
+  setPromptText: (value: string) => void
   onRefresh: () => void
 }) {
-  const [promptText, setPromptText] = useState("")
   const [ratio, setRatio] = useState(settings.default_ratio || "9:16")
   const [duration, setDuration] = useState(settings.default_duration || 15)
   const [parallel, setParallel] = useState(settings.default_parallel || 30)
-  const [saveFolder, setSaveFolder] = useState(settings.output_dir || "")
   const [cleanWatermark, setCleanWatermark] = useState(true)
   const [submitting, setSubmitting] = useState(false)
   const [logSearch, setLogSearch] = useState("")
@@ -136,7 +211,6 @@ function VideoConsole({
     setRatio((current) => current || settings.default_ratio || "9:16")
     setDuration((current) => current || settings.default_duration || 15)
     setParallel((current) => current || settings.default_parallel || 30)
-    setSaveFolder((current) => current || settings.output_dir || "")
   }, [settings])
 
   const stats = useMemo(() => {
@@ -167,7 +241,7 @@ function VideoConsole({
     }
     setSubmitting(true)
     try {
-      await api.createVideoJob({ prompts, ratio, duration, parallel, save_folder: saveFolder, clean_watermark: cleanWatermark })
+      await api.createVideoJob({ prompts, ratio, duration, parallel, save_folder: DOCKER_OUTPUT_DIR, clean_watermark: cleanWatermark })
       toast.success("Video generation queued")
       onRefresh()
     } catch (error) {
@@ -195,14 +269,9 @@ function VideoConsole({
           <h1 className="text-xl font-black tracking-tight sm:text-2xl">Seedance Vid Gen</h1>
           <p className="mt-1 text-xs font-semibold text-muted-foreground">Bulk generate high quality Seedance AI videos through Dola automation.</p>
         </div>
-        <div className="flex flex-wrap gap-2">
-          <IconButton label="Refresh" onClick={onRefresh}><RefreshCw size={16} /></IconButton>
-          <IconButton label="Status"><Zap size={16} /></IconButton>
-          <IconButton label="Theme"><Settings2 size={16} /></IconButton>
-        </div>
       </div>
 
-      <OutputLocation path={saveFolder} setPath={setSaveFolder} />
+      <OutputLocation path={HOST_OUTPUT_LABEL} containerPath={DOCKER_OUTPUT_DIR} />
 
       <section className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
         <StatBox label="Total" value={stats.total} />
@@ -251,7 +320,7 @@ function VideoConsole({
   )
 }
 
-function OutputLocation({ path, setPath }: { path: string; setPath: (path: string) => void }) {
+function OutputLocation({ path, containerPath }: { path: string; containerPath: string }) {
   return (
     <Card className="p-4">
       <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
@@ -261,17 +330,11 @@ function OutputLocation({ path, setPath }: { path: string; setPath: (path: strin
           </div>
           <div className="min-w-0">
             <div className="text-xs font-black uppercase tracking-[0.16em] text-muted-foreground">Video output location</div>
-            <Input
-              className="mt-2 h-9 max-w-3xl border-transparent bg-transparent px-0 font-mono text-xs focus:ring-0"
-              value={path}
-              onChange={(event) => setPath(event.target.value)}
-              placeholder="Set an output folder before starting a job"
-            />
+            <div className="mt-2 truncate font-mono text-xs font-bold text-foreground">{path}</div>
+            <div className="mt-1 text-[11px] font-semibold text-muted-foreground">
+              New MP4s are written directly by Docker to the host Downloads folder. Container path: {containerPath}
+            </div>
           </div>
-        </div>
-        <div className="flex shrink-0 flex-wrap gap-2">
-          <Button variant="ghost" className="text-primary"><FolderOpen size={15} />Open Folder</Button>
-          <Button><Folder size={15} />Change Folder</Button>
         </div>
       </div>
     </Card>
@@ -457,7 +520,7 @@ function VideoGallery({ videos }: { videos: VideoArtifact[] }) {
                   <Badge tone={tone(job.status)}>{job.status}</Badge>
                 </div>
                 <div className="flex flex-wrap gap-2">
-                  <a className="inline-flex h-9 items-center gap-2 rounded-md bg-primary px-3 text-sm font-bold text-primary-foreground hover:opacity-90" href={artifactUrl(artifact.id)} target="_blank" rel="noreferrer"><FolderOpen size={16} />Open</a>
+                  <a className="inline-flex h-9 items-center gap-2 rounded-md bg-primary px-3 text-sm font-bold text-primary-foreground hover:opacity-90" href={artifactUrl(artifact.id)} target="_blank" rel="noreferrer"><Folder size={16} />Open</a>
                   <a className="inline-flex h-9 items-center gap-2 rounded-md bg-muted px-3 text-sm font-bold text-foreground hover:bg-border" href={artifactUrl(artifact.id)} download><Download size={16} />Download</a>
                 </div>
               </div>
@@ -475,12 +538,238 @@ function VideoGallery({ videos }: { videos: VideoArtifact[] }) {
   )
 }
 
-function History({ jobs }: { jobs: Job[] }) {
+function PromptGenerator({
+  settings,
+  onSettingsSaved,
+  onUsePrompts,
+}: {
+  settings: SettingsPayload
+  onSettingsSaved: (settings: SettingsPayload) => void
+  onUsePrompts: (text: string) => void
+}) {
+  const [idea, setIdea] = useState("")
+  const [count, setCount] = useState(5)
+  const [duration, setDuration] = useState(15)
+  const [apiKey, setApiKey] = useState(settings.gemini_api_key || "")
+  const [baseUrl, setBaseUrl] = useState(settings.gemini_base_url || "https://generativelanguage.googleapis.com/v1beta")
+  const [model, setModel] = useState(settings.gemini_model || "gemini-2.5-flash")
+  const [generated, setGenerated] = useState<string[]>([])
+  const [generating, setGenerating] = useState(false)
+  const [savingSettings, setSavingSettings] = useState(false)
+  const [copied, setCopied] = useState<number | "all" | null>(null)
+
+  const generatedText = generated.join("\n")
+
+  useEffect(() => {
+    setApiKey(settings.gemini_api_key || "")
+    setBaseUrl(settings.gemini_base_url || "https://generativelanguage.googleapis.com/v1beta")
+    setModel(settings.gemini_model || "gemini-2.5-flash")
+  }, [settings])
+
+  async function saveGeminiSettings() {
+    setSavingSettings(true)
+    try {
+      const nextSettings = { ...settings, gemini_api_key: apiKey, gemini_base_url: baseUrl, gemini_model: model }
+      const saved = await api.saveSettings(nextSettings)
+      onSettingsSaved(saved)
+      toast.success("Gemini API settings saved")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to save Gemini settings")
+    } finally {
+      setSavingSettings(false)
+    }
+  }
+
+  async function generate() {
+    if (!idea.trim()) {
+      toast.error("Add a master idea first.")
+      return
+    }
+    if (!apiKey.trim()) {
+      toast.error("Add and save your Gemini API key first.")
+      return
+    }
+    setGenerating(true)
+    try {
+      const saved = await api.saveSettings({ ...settings, gemini_api_key: apiKey, gemini_base_url: baseUrl, gemini_model: model })
+      onSettingsSaved(saved)
+      const result = await api.generatePrompts({ master_prompt: idea, count, duration, ratio: "9:16", style: "cinematic realistic" })
+      setGenerated(result.prompts)
+      toast.success(`Generated ${result.prompts.length} prompt${result.prompts.length === 1 ? "" : "s"} with ${result.model}`)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to generate prompts")
+    } finally {
+      setGenerating(false)
+    }
+  }
+
+  async function copyText(text: string, index: number | "all") {
+    await navigator.clipboard.writeText(text)
+    setCopied(index)
+    setTimeout(() => setCopied(null), 1400)
+  }
+
+  function downloadPrompts() {
+    if (!generated.length) return
+    const blob = new Blob([generated.map((prompt, index) => `${index + 1}. ${prompt}`).join("\n\n")], { type: "text/plain" })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement("a")
+    link.href = url
+    link.download = "auto-dola-seedance-prompts.txt"
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    URL.revokeObjectURL(url)
+  }
+
+  return (
+    <div className="mx-auto max-w-[1760px] space-y-5">
+      <div className="flex flex-col gap-3 border-b border-border/70 pb-4 lg:flex-row lg:items-center lg:justify-between">
+        <div>
+          <h1 className="text-xl font-black tracking-tight sm:text-2xl">Prompt Generator</h1>
+          <p className="mt-1 text-xs font-semibold text-muted-foreground">Create polished Seedance-ready video prompts from one master idea.</p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <Button variant="secondary" onClick={() => copyText(generatedText, "all")} disabled={!generated.length}>
+            {copied === "all" ? <Check size={16} /> : <Copy size={16} />}
+            Copy All
+          </Button>
+          <Button variant="secondary" onClick={downloadPrompts} disabled={!generated.length}>
+            <Download size={16} />
+            Download TXT
+          </Button>
+          <Button onClick={() => onUsePrompts(generatedText)} disabled={!generated.length}>
+            <FileVideo size={16} />
+            Use in Video Studio
+          </Button>
+        </div>
+      </div>
+
+      <section className="grid grid-cols-1 gap-5 xl:grid-cols-[minmax(360px,0.38fr)_minmax(560px,0.62fr)]">
+        <Card className="p-4">
+          <SectionTitle icon={<Wand2 size={15} />} title="Generator Settings" badge="gemini" />
+          <div className="mt-4 space-y-4">
+            <div className="rounded-md border border-primary/25 bg-primary/5 p-3">
+              <div className="text-xs font-black uppercase tracking-wide text-primary">Gemini API Configuration</div>
+              <div className="mt-3 grid grid-cols-1 gap-3">
+                <Field label="Gemini API key">
+                  <Input
+                    type="password"
+                    value={apiKey}
+                    onChange={(event) => setApiKey(event.target.value)}
+                    placeholder="Paste your Gemini API key here"
+                  />
+                </Field>
+                <Field label="Gemini API host">
+                  <Input
+                    value={baseUrl}
+                    onChange={(event) => setBaseUrl(event.target.value)}
+                    placeholder="localhost:8045"
+                  />
+                </Field>
+                <Field label="Gemini model">
+                  <Select value={model} onChange={(event) => setModel(event.target.value)}>
+                    {GEMINI_MODELS.map((option) => (
+                      <option key={option.value} value={option.value}>{option.label}</option>
+                    ))}
+                  </Select>
+                </Field>
+              </div>
+              <Button variant="secondary" className="mt-3 w-full" onClick={saveGeminiSettings} disabled={savingSettings}>
+                {savingSettings ? <Loader2 className="animate-spin" size={16} /> : <Settings2 size={16} />}
+                Save API Configuration
+              </Button>
+            </div>
+            <Field label="Master idea">
+              <Textarea
+                className="min-h-[160px] resize-y border-border/80 bg-[#11121d] font-mono text-sm"
+                value={idea}
+                onChange={(event) => setIdea(event.target.value)}
+                placeholder="Example: luxury sports car racing through neon rain at night"
+              />
+            </Field>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <Field label="Prompt count">
+                <Input type="number" min={1} max={50} value={count} onChange={(event) => setCount(clampNumber(Number(event.target.value), 1, 50))} />
+              </Field>
+              <Field label="Duration">
+                <Select value={String(duration)} onChange={(event) => setDuration(Number(event.target.value))}>
+                  <option value="5">5</option>
+                  <option value="10">10</option>
+                  <option value="15">15</option>
+                  <option value="30">30</option>
+                  <option value="60">60</option>
+                </Select>
+              </Field>
+            </div>
+            <Button className="h-12 w-full bg-[#ff225c] text-white hover:bg-[#ff3b6f]" onClick={generate} disabled={generating}>
+              {generating ? <Loader2 className="animate-spin" size={17} /> : <Wand2 size={17} />}
+              {generating ? "Generating With Gemini" : "Generate Prompts"}
+            </Button>
+          </div>
+        </Card>
+
+        <Card className="overflow-hidden">
+          <div className="flex flex-col gap-3 border-b border-border bg-[#0d0f1c] p-4 sm:flex-row sm:items-center sm:justify-between">
+            <SectionTitle icon={<FileText size={15} />} title="Generated Prompts" badge={`${generated.length} ready`} />
+            <div className="text-xs font-semibold text-muted-foreground">One prompt per line can be sent directly to Video Studio.</div>
+          </div>
+          <div className="max-h-[650px] space-y-3 overflow-auto p-4">
+            {generated.map((prompt, index) => (
+              <div key={`${prompt}-${index}`} className="rounded-md border border-border bg-background/70 p-4">
+                <div className="mb-3 flex items-center justify-between gap-3">
+                  <Badge>Prompt {index + 1}</Badge>
+                  <Button variant="secondary" className="h-8 text-xs" onClick={() => copyText(prompt, index)}>
+                    {copied === index ? <Check size={14} /> : <Copy size={14} />}
+                    {copied === index ? "Copied" : "Copy"}
+                  </Button>
+                </div>
+                <p className="whitespace-pre-wrap font-mono text-sm leading-6 text-foreground">{prompt}</p>
+              </div>
+            ))}
+            {!generated.length && (
+              <div className="flex min-h-[360px] flex-col items-center justify-center text-center">
+                <div className="flex h-12 w-12 items-center justify-center rounded-full bg-primary/10 text-primary"><Wand2 size={24} /></div>
+                <h3 className="mt-4 text-lg font-black">No prompts generated yet.</h3>
+                <p className="mt-2 max-w-md text-sm leading-6 text-muted-foreground">Enter a master idea and generate prompt variations for Seedance video jobs.</p>
+              </div>
+            )}
+          </div>
+        </Card>
+      </section>
+    </div>
+  )
+}
+
+function History({ jobs, onRefresh }: { jobs: Job[]; onRefresh: () => void }) {
+  const [clearing, setClearing] = useState(false)
+
+  async function clearHistory() {
+    if (!jobs.length) return
+    if (!window.confirm("Clear all video history from the app? Generated MP4 files in Downloads will not be deleted.")) return
+    setClearing(true)
+    try {
+      const result = await api.clearVideoHistory()
+      toast.success(`Cleared ${result.deleted} history item${result.deleted === 1 ? "" : "s"}`)
+      onRefresh()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to clear history")
+    } finally {
+      setClearing(false)
+    }
+  }
+
   return (
     <div className="mx-auto max-w-[1760px] space-y-4">
-      <div>
-        <h2 className="text-2xl font-black">Video history</h2>
-        <p className="mt-1 text-sm text-muted-foreground">All Seedance batches, artifacts, failures, and downloads.</p>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+        <div>
+          <h2 className="text-2xl font-black">Video history</h2>
+          <p className="mt-1 text-sm text-muted-foreground">All Seedance batches, artifacts, failures, and downloads.</p>
+        </div>
+        <Button className="bg-red-500/15 text-red-200 hover:bg-red-500/25" onClick={clearHistory} disabled={!jobs.length || clearing}>
+          {clearing ? <Loader2 className="animate-spin" size={16} /> : <Trash2 size={16} />}
+          Clear History
+        </Button>
       </div>
       <JobTable jobs={jobs} />
     </div>
@@ -549,4 +838,9 @@ function formatBytes(bytes: number) {
   const units = ["B", "KB", "MB", "GB"]
   const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1)
   return `${(bytes / 1024 ** index).toFixed(index === 0 ? 0 : 1)} ${units[index]}`
+}
+
+function clampNumber(value: number, min: number, max: number) {
+  if (Number.isNaN(value)) return min
+  return Math.max(min, Math.min(max, value))
 }
