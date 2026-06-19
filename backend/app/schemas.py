@@ -1,0 +1,90 @@
+from datetime import datetime
+from typing import Any
+from uuid import UUID
+
+from pydantic import BaseModel, Field
+
+
+class PromptItem(BaseModel):
+    prompt: str = Field(min_length=1)
+    title: str = ""
+
+
+class VideoJobCreate(BaseModel):
+    prompts: list[PromptItem] = Field(min_length=1, max_length=50)
+    ratio: str = "9:16"
+    duration: int = Field(default=15, ge=5, le=60)
+    save_folder: str = ""
+    parallel: int = Field(default=5, ge=1, le=50)
+    clean_watermark: bool = True
+
+
+class ImageJobCreate(BaseModel):
+    prompts: list[str] = Field(min_length=1, max_length=100)
+    aspect_ratio: str = "1:1"
+    output_folder: str = ""
+
+
+class TTSJobCreate(BaseModel):
+    lines: list[str] = Field(min_length=1, max_length=100)
+    voice: str = "en-US-AriaNeural"
+    output_folder: str = ""
+
+
+class JobItemRead(BaseModel):
+    id: UUID
+    prompt: str
+    title: str
+    status: str
+    action: str
+    error: str | None
+    artifact_id: UUID | None
+    updated_at: datetime
+
+
+class ArtifactRead(BaseModel):
+    id: UUID
+    kind: str
+    filename: str
+    mime_type: str
+    size_bytes: int
+    created_at: datetime
+
+
+class JobRead(BaseModel):
+    id: UUID
+    kind: str
+    status: str
+    title: str
+    created_at: datetime
+    updated_at: datetime
+    total: int
+    done: int
+    failed: int
+    config_json: dict[str, Any]
+    error: str | None
+    items: list[JobItemRead] = []
+    artifacts: list[ArtifactRead] = []
+
+
+class SettingsPayload(BaseModel):
+    dola_auth_cookies: str = ""
+    yousmind_api_key: str = ""
+    default_ratio: str = "9:16"
+    default_duration: int = 15
+    default_parallel: int = 5
+    output_dir: str = ""
+    proxy_enabled: bool = False
+    proxy_url: str = ""
+    tts_default_voice: str = "en-US-AriaNeural"
+
+
+class ProxyTestRequest(BaseModel):
+    proxy_url: str
+
+
+class HealthRead(BaseModel):
+    ok: bool
+    service: str
+    environment: str
+    database: str
