@@ -27,6 +27,7 @@ import { Badge, Button, Card, Input, Progress, Select, Textarea } from "@/compon
 const DOCKER_OUTPUT_DIR = "/data/downloads"
 const HOST_OUTPUT_LABEL = import.meta.env.VITE_OUTPUT_LABEL ?? "Downloads/AUTO-DOLA"
 const PROMPT_UI_BATCH_SIZE = 5
+const QUEUE_PAGE_SIZE = 10
 const GEMINI_MODELS = [
   { value: "gemini-2.5-flash-lite", label: "Gemini 3.1 Flash Lite" },
   { value: "gemini-2.5-flash-thinking", label: "Gemini 3.1 Flash Lite (Thinking)" },
@@ -229,7 +230,7 @@ function VideoConsole({
   const progressTotal = activeJob?.total || stats.total || 0
   const progressDone = activeJob ? activeJob.done + activeJob.failed : stats.done + stats.failed
   const progress = progressTotal ? Math.round((progressDone / progressTotal) * 100) : 0
-  const queueItems = activeJob?.items ?? jobs.flatMap((job) => job.items).slice(0, 8)
+  const queueItems = activeJob?.items ?? jobs.flatMap((job) => job.items)
   const filteredLogs = logs
     .filter(isStudioLogVisible)
     .filter((row) => row.message.toLowerCase().includes(logSearch.toLowerCase()) || row.level.toLowerCase().includes(logSearch.toLowerCase()))
@@ -431,9 +432,32 @@ function PromptsPanel({ promptText, setPromptText, count }: { promptText: string
 }
 
 function GenerationQueue({ items }: { items: JobItem[] }) {
+  const [page, setPage] = useState(1)
+  const pageCount = Math.max(1, Math.ceil(items.length / QUEUE_PAGE_SIZE))
+  const safePage = Math.min(page, pageCount)
+  const start = (safePage - 1) * QUEUE_PAGE_SIZE
+  const pageItems = items.slice(start, start + QUEUE_PAGE_SIZE)
+
+  useEffect(() => {
+    setPage((current) => Math.min(current, Math.max(1, Math.ceil(items.length / QUEUE_PAGE_SIZE))))
+  }, [items.length])
+
   return (
     <Card className="p-4">
-      <SectionTitle icon={<Zap size={15} />} title="Generation Queue" />
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <SectionTitle icon={<Zap size={15} />} title="Generation Queue" badge={items.length ? `${items.length} total` : undefined} />
+        {items.length > QUEUE_PAGE_SIZE && (
+          <div className="flex items-center gap-2 text-xs font-bold text-muted-foreground">
+            <Button variant="secondary" className="h-8 px-2 text-xs" onClick={() => setPage((current) => Math.max(1, current - 1))} disabled={safePage <= 1}>
+              Prev
+            </Button>
+            <span className="min-w-[92px] text-center">Page {safePage} / {pageCount}</span>
+            <Button variant="secondary" className="h-8 px-2 text-xs" onClick={() => setPage((current) => Math.min(pageCount, current + 1))} disabled={safePage >= pageCount}>
+              Next
+            </Button>
+          </div>
+        )}
+      </div>
       <div className="mt-4 overflow-x-auto rounded-md border border-border">
         <table className="w-full min-w-[560px] text-left text-xs">
           <thead className="bg-muted/50 text-[11px] uppercase tracking-wide text-muted-foreground">
@@ -445,9 +469,9 @@ function GenerationQueue({ items }: { items: JobItem[] }) {
             </tr>
           </thead>
           <tbody>
-            {items.map((item, index) => (
+            {pageItems.map((item, index) => (
               <tr key={item.id} className="border-t border-border">
-                <td className="px-3 py-3 text-muted-foreground">{index + 1}</td>
+                <td className="px-3 py-3 text-muted-foreground">{start + index + 1}</td>
                 <td className="max-w-[260px] truncate px-3 py-3 font-bold">{item.prompt}</td>
                 <td className="px-3 py-3"><Badge tone={tone(item.status)}>{item.status}</Badge></td>
                 <td className="max-w-[240px] truncate px-3 py-3 text-muted-foreground">{item.error || item.action || "Waiting..."}</td>
@@ -457,6 +481,11 @@ function GenerationQueue({ items }: { items: JobItem[] }) {
           </tbody>
         </table>
       </div>
+      {items.length > QUEUE_PAGE_SIZE && (
+        <div className="mt-3 text-right text-xs font-semibold text-muted-foreground">
+          Showing {start + 1}-{Math.min(start + QUEUE_PAGE_SIZE, items.length)} of {items.length}
+        </div>
+      )}
     </Card>
   )
 }
