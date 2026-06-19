@@ -13,8 +13,17 @@ def log(session: Session, message: str, level: str = "info", job_id: UUID | None
     row = LogEvent(job_id=job_id, level=level, message=message)
     session.add(row)
     session.commit()
+    session.refresh(row)
+    payload = {
+        "type": "log",
+        "id": str(row.id),
+        "job_id": str(row.job_id) if row.job_id else None,
+        "level": row.level,
+        "message": row.message,
+        "created_at": row.created_at.isoformat(),
+    }
     try:
-        asyncio.get_running_loop().create_task(publish_log(row))
+        asyncio.get_running_loop().create_task(publish_log(payload))
     except RuntimeError:
         pass
     return row

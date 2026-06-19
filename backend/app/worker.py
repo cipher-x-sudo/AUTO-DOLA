@@ -26,7 +26,6 @@ def process_job(job_id: str) -> None:
 
 
 async def _process_job(job_id: UUID) -> None:
-    init_db()
     with Session(engine) as session:
         job = session.get(Job, job_id)
         if not job:

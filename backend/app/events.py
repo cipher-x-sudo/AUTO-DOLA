@@ -3,10 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections import defaultdict
-from datetime import datetime
 from uuid import UUID
-
-from app.models import LogEvent
 
 
 class EventHub:
@@ -32,18 +29,10 @@ class EventHub:
 hub = EventHub()
 
 
-async def publish_log(log: LogEvent) -> None:
-    payload = {
-        "type": "log",
-        "id": str(log.id),
-        "job_id": str(log.job_id) if log.job_id else None,
-        "level": log.level,
-        "message": log.message,
-        "created_at": log.created_at.isoformat() if isinstance(log.created_at, datetime) else str(log.created_at),
-    }
+async def publish_log(payload: dict) -> None:
     await hub.publish("system", payload)
-    if log.job_id:
-        await hub.publish(job_channel(log.job_id), payload)
+    if payload.get("job_id"):
+        await hub.publish(job_channel(payload["job_id"]), payload)
 
 
 def job_channel(job_id: UUID | str) -> str:
