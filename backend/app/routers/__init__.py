@@ -1,1 +1,1 @@
-__all__ = ["artifacts", "health", "images", "jobs", "prompts", "settings_router", "system", "tts"]
+__all__ = ["artifacts", "health", "images", "jobs", "niches", "prompts", "settings_router", "system", "tts"]

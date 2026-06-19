@@ -101,6 +101,35 @@ class PromptGenerateResponse(BaseModel):
     model: str
 
 
+class NicheRead(BaseModel):
+    id: str
+    name: str
+    filename: str
+    size_bytes: int
+
+
+class NichePromptGenerateRequest(BaseModel):
+    niche_ids: list[str] = Field(min_length=1)
+    count: int = Field(default=5, ge=1)
+    count_mode: str = "global"
+    duration: int = Field(default=15, ge=5, le=60)
+    style: str = "cinematic realistic"
+
+
+class NichePromptGroup(BaseModel):
+    niche_id: str
+    niche_name: str
+    filename: str
+    requested_count: int
+    prompts: list[str]
+    saved_path: str
+
+
+class NichePromptGenerateResponse(BaseModel):
+    groups: list[NichePromptGroup]
+    model: str
+
+
 class HealthRead(BaseModel):
     ok: bool
     service: str

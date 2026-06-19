@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     output_dir: Path = Path("./outputs")
     profile_dir: Path = Path("./profiles")
     log_dir: Path = Path("./logs")
+    niches_dir: Path = Path("./niches")
+    generated_prompts_dir: Path = Path("./generated-prompts")
     ffmpeg_bin: str = "ffmpeg"
     auto_dola_inline_worker: bool = False
     dola_auth_cookies: str = ""
@@ -31,7 +33,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     def ensure_dirs(self) -> None:
-        for path in (self.output_dir, self.profile_dir, self.log_dir):
+        for path in (self.output_dir, self.profile_dir, self.log_dir, self.generated_prompts_dir):
             path.mkdir(parents=True, exist_ok=True)
 
 
