@@ -29,3 +29,14 @@ def test_parse_vid() -> None:
 def test_parse_play_info() -> None:
     payload = {"code": 0, "data": {"play_infos": [{"main": "https://cdn.example/video.mp4"}]}}
     assert parse_play_info(payload) == "https://cdn.example/video.mp4"
+
+
+def test_api_logs_route_smoke() -> None:
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    with TestClient(app) as client:
+        response = client.get("/api/video/logs")
+    assert response.status_code == 200
+    assert isinstance(response.json(), list)
