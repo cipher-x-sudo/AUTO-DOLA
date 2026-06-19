@@ -38,8 +38,15 @@ def recompute_job(session: Session, job_id: UUID) -> Job:
     job.total = len(items)
     job.done = len([i for i in items if i.status == ItemStatus.completed])
     job.failed = len([i for i in items if i.status == ItemStatus.failed])
-    if items and all(i.status in {ItemStatus.completed, ItemStatus.failed, ItemStatus.cancelled} for i in items):
-        job.status = JobStatus.completed if job.failed == 0 else JobStatus.failed
+    if job.status == JobStatus.cancelled:
+        pass
+    elif items and all(i.status in {ItemStatus.completed, ItemStatus.failed, ItemStatus.cancelled} for i in items):
+        if all(i.status == ItemStatus.cancelled for i in items):
+            job.status = JobStatus.cancelled
+        elif job.failed:
+            job.status = JobStatus.failed
+        else:
+            job.status = JobStatus.completed
     job.updated_at = utcnow()
     session.add(job)
     session.commit()

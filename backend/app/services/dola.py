@@ -226,12 +226,18 @@ class DolaClient:
         vid: str,
         *,
         raw_response_fn: Callable[[str, int, int, str], None] | None = None,
+        cancel_fn: Callable[[], bool] | None = None,
+        log_fn: Callable[[str, str], None] | None = None,
     ) -> str | None:
         url = session.url.replace("chat/completion", "samantha/video/get_play_info")
         headers = {k: v for k, v in session.headers.items() if k.lower() not in {"content-type", "accept-encoding"}}
         headers["content-type"] = "application/json"
         async with httpx.AsyncClient(timeout=self.timeout, verify=False) as client:
             for attempt in range(1, 201):
+                if cancel_fn and cancel_fn():
+                    if log_fn:
+                        log_fn("Download URL polling cancelled.", "warn")
+                    return None
                 response = await client.post(url, headers=headers, json={"vid": vid})
                 if raw_response_fn:
                     raw_response_fn("play_info", attempt, response.status_code, response.text)
@@ -239,7 +245,12 @@ class DolaClient:
                     download_url = parse_play_info(response.json())
                     if download_url:
                         return download_url
-                await asyncio.sleep(5)
+                for _ in range(10):
+                    if cancel_fn and cancel_fn():
+                        if log_fn:
+                            log_fn("Download URL polling cancelled.", "warn")
+                        return None
+                    await asyncio.sleep(0.5)
         return None
 
 

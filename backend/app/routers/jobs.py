@@ -93,12 +93,12 @@ def cancel_job(job_id: UUID, session: Session = Depends(get_session)) -> Job:
     for item in job.items:
         if item.status in {"queued", "running"}:
             item.status = "cancelled"
-            item.action = "Cancelled"
+            item.action = "Force stopped"
             item.updated_at = utcnow()
             session.add(item)
     session.add(job)
     session.commit()
-    log(session, "Cancellation requested.", "warn", job.id)
+    log(session, "Force stop requested. Worker will stop active polling/downloads and skip queued items.", "warn", job.id)
     return get_job(job_id, session)
 
 
