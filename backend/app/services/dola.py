@@ -188,7 +188,7 @@ class DolaClient:
                     raw_response_fn("chain_poll", attempt, response.status_code, response.text)
                 if response.status_code == 200:
                     payload = response.json()
-                    vid, checked_paths = parse_vid_with_diagnostics(payload)
+                    vid, _ = parse_vid_with_diagnostics(payload)
                     if vid:
                         if log_fn:
                             log_fn("Dola returned video id.", "success")
@@ -202,8 +202,6 @@ class DolaClient:
                                 log_fn(message[:500], level)
                         if is_terminal_video_failure(message):
                             raise RuntimeError(f"Dola did not continue video generation: {message[:500]}")
-                    if log_fn:
-                        log_fn(f"No Dola video id found yet. Checked paths: {', '.join(checked_paths)}.", "debug")
                 elif log_fn and attempt == 1:
                     log_fn(f"Dola chain poll returned HTTP {response.status_code}.", "warn")
                 await asyncio.sleep(sleep_seconds)

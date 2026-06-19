@@ -90,7 +90,14 @@ export default function App() {
   }, [jobs, refresh, runningJobIds])
 
   const activeJob = useMemo(() => jobs.find((job) => job.status === "running" || job.status === "queued") ?? jobs[0], [jobs])
-  const recentLogs = useMemo(() => logs.filter((row) => !activeJob || row.job_id === activeJob.id).slice(0, 16), [activeJob, logs])
+  const recentLogs = useMemo(
+    () =>
+      logs
+        .filter((row) => !activeJob || row.job_id === activeJob.id)
+        .filter(isStudioLogVisible)
+        .slice(0, 16),
+    [activeJob, logs],
+  )
   const videos = useMemo(() => collectVideoArtifacts(jobs), [jobs])
 
   return (
@@ -148,7 +155,9 @@ function VideoConsole({
   const progressDone = activeJob ? activeJob.done + activeJob.failed : stats.done + stats.failed
   const progress = progressTotal ? Math.round((progressDone / progressTotal) * 100) : 0
   const queueItems = activeJob?.items ?? jobs.flatMap((job) => job.items).slice(0, 8)
-  const filteredLogs = logs.filter((row) => row.message.toLowerCase().includes(logSearch.toLowerCase()) || row.level.toLowerCase().includes(logSearch.toLowerCase()))
+  const filteredLogs = logs
+    .filter(isStudioLogVisible)
+    .filter((row) => row.message.toLowerCase().includes(logSearch.toLowerCase()) || row.level.toLowerCase().includes(logSearch.toLowerCase()))
 
   async function submit() {
     const prompts = promptLines(promptText).map((prompt) => ({ title: prompt.slice(0, 70), prompt }))
@@ -414,6 +423,14 @@ function LiveLogConsole({ logs, search, setSearch }: { logs: LogRow[]; search: s
       </div>
     </Card>
   )
+}
+
+function isStudioLogVisible(row: LogRow) {
+  const message = row.message.trim()
+  if (row.level === "debug") return false
+  if (message.startsWith("RAW ")) return false
+  if (message.includes("No Dola video id found yet")) return false
+  return true
 }
 
 function VideoGallery({ videos }: { videos: VideoArtifact[] }) {
