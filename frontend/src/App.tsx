@@ -26,6 +26,7 @@ import { Badge, Button, Card, Input, Progress, Select, Textarea } from "@/compon
 
 const DOCKER_OUTPUT_DIR = "/data/downloads"
 const HOST_OUTPUT_LABEL = import.meta.env.VITE_OUTPUT_LABEL ?? "Downloads/AUTO-DOLA"
+const PROMPT_UI_BATCH_SIZE = 5
 const GEMINI_MODELS = [
   { value: "gemini-2.5-flash-lite", label: "Gemini 3.1 Flash Lite" },
   { value: "gemini-2.5-flash-thinking", label: "Gemini 3.1 Flash Lite (Thinking)" },
@@ -556,10 +557,12 @@ function PromptGenerator({
   const [model, setModel] = useState(settings.gemini_model || "gemini-2.5-flash")
   const [generated, setGenerated] = useState<string[]>([])
   const [generating, setGenerating] = useState(false)
+  const [generationTarget, setGenerationTarget] = useState(0)
   const [savingSettings, setSavingSettings] = useState(false)
   const [copied, setCopied] = useState<number | "all" | null>(null)
 
   const generatedText = generated.join("\n")
+  const generationProgress = generationTarget ? Math.min(100, Math.round((generated.length / generationTarget) * 100)) : 0
 
   useEffect(() => {
     setApiKey(settings.gemini_api_key || "")
@@ -591,16 +594,39 @@ function PromptGenerator({
       return
     }
     setGenerating(true)
+    setGenerated([])
+    setGenerationTarget(count)
     try {
       const saved = await api.saveSettings({ ...settings, gemini_api_key: apiKey, gemini_base_url: baseUrl, gemini_model: model })
       onSettingsSaved(saved)
-      const result = await api.generatePrompts({ master_prompt: idea, count, duration, ratio: "9:16", style: "cinematic realistic" })
-      setGenerated(result.prompts)
-      toast.success(`Generated ${result.prompts.length} prompt${result.prompts.length === 1 ? "" : "s"} with ${result.model}`)
+      const nextPrompts: string[] = []
+      const seen = new Set<string>()
+      let resultModel = model
+      while (nextPrompts.length < count) {
+        const remaining = count - nextPrompts.length
+        const batchCount = Math.min(PROMPT_UI_BATCH_SIZE, remaining)
+        const batchIdea = buildProgressivePromptRequest(idea, nextPrompts)
+        const result = await api.generatePrompts({ master_prompt: batchIdea, count: batchCount, duration, ratio: "9:16", style: "cinematic realistic" })
+        resultModel = result.model
+        for (const prompt of result.prompts) {
+          const key = prompt.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim()
+          if (key && !seen.has(key)) {
+            seen.add(key)
+            nextPrompts.push(prompt)
+          }
+          if (nextPrompts.length >= count) break
+        }
+        setGenerated([...nextPrompts])
+        if (!result.prompts.length) {
+          throw new Error(`Gemini returned no prompts after ${nextPrompts.length}/${count}.`)
+        }
+      }
+      toast.success(`Generated ${nextPrompts.length} prompt${nextPrompts.length === 1 ? "" : "s"} with ${resultModel}`)
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Failed to generate prompts")
     } finally {
       setGenerating(false)
+      setGenerationTarget(0)
     }
   }
 
@@ -705,15 +731,24 @@ function PromptGenerator({
             </div>
             <Button className="h-12 w-full bg-[#ff225c] text-white hover:bg-[#ff3b6f]" onClick={generate} disabled={generating}>
               {generating ? <Loader2 className="animate-spin" size={17} /> : <Wand2 size={17} />}
-              {generating ? "Generating With Gemini" : "Generate Prompts"}
+              {generating ? `Generating ${generated.length} / ${generationTarget}` : "Generate Prompts"}
             </Button>
+            {generating && (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between text-[11px] font-black uppercase tracking-wide text-muted-foreground">
+                  <span>Live prompt batches</span>
+                  <span>{generationProgress}%</span>
+                </div>
+                <Progress value={generationProgress} />
+              </div>
+            )}
           </div>
         </Card>
 
         <Card className="overflow-hidden">
           <div className="flex flex-col gap-3 border-b border-border bg-[#0d0f1c] p-4 sm:flex-row sm:items-center sm:justify-between">
-            <SectionTitle icon={<FileText size={15} />} title="Generated Prompts" badge={`${generated.length} ready`} />
-            <div className="text-xs font-semibold text-muted-foreground">One prompt per line can be sent directly to Video Studio.</div>
+            <SectionTitle icon={<FileText size={15} />} title="Generated Prompts" badge={generating ? `${generated.length}/${generationTarget} ready` : `${generated.length} ready`} />
+            <div className="text-xs font-semibold text-muted-foreground">{generating ? `Showing each completed batch of ${PROMPT_UI_BATCH_SIZE} as soon as it returns.` : "One prompt per line can be sent directly to Video Studio."}</div>
           </div>
           <div className="max-h-[650px] space-y-3 overflow-auto p-4">
             {generated.map((prompt, index) => (
@@ -816,6 +851,16 @@ function IconButton({ label, children, onClick }: { label: string; children: Rea
 
 function promptLines(text: string) {
   return text.split("\n").map((line) => line.trim()).filter(Boolean)
+}
+
+function buildProgressivePromptRequest(masterIdea: string, previousPrompts: string[]) {
+  if (!previousPrompts.length) return masterIdea
+  return [
+    masterIdea,
+    "",
+    "Already generated prompts. Do not repeat these ideas, wording, scene setups, camera moves, or subject actions:",
+    ...previousPrompts.slice(-40).map((prompt, index) => `${index + 1}. ${prompt}`),
+  ].join("\n")
 }
 
 function collectVideoArtifacts(jobs: Job[]): VideoArtifact[] {
