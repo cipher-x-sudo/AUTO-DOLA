@@ -13,6 +13,18 @@ Open `http://localhost:3000`.
 
 The backend API runs on `http://localhost:8000`.
 
+## Dola Video Sessions
+
+AUTO-DOLA builds a fresh Dola web session for every video item. It fetches public Dola cookies such as `ttwid` automatically, then optionally merges user-owned auth cookies if you provide them locally.
+
+For Docker, place a cookie file at `secrets/dola_auth_cookies` before starting the stack. For local backend runs, you can also use `auth_cookies.txt` in the repo root or `backend/auth_cookies.txt`. The file may contain either `name=value` lines or one raw browser cookie header string. These files are ignored by Git.
+
+Check session readiness without exposing cookie values:
+
+```powershell
+Invoke-RestMethod http://localhost:8000/api/system/dola-session
+```
+
 ## Development
 
 ```powershell

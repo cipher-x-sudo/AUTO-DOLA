@@ -13,7 +13,7 @@ from sqlmodel import Session, select
 from app.config import settings
 from app.database import engine, init_db
 from app.models import Artifact, ItemStatus, Job, JobItem, JobKind, JobStatus, utcnow
-from app.services.dola import DolaClient, build_dola_payload
+from app.services.dola import DolaClient, DolaSubmissionError, build_dola_payload, format_diagnostic
 from app.services.images import generate_image
 from app.services.jobs import add_artifact, log, mark_item, recompute_job
 from app.services.media import clean_video, safe_filename
@@ -77,6 +77,8 @@ async def process_video(session: Session, job: Job) -> None:
                         action_prefix = f"[{attempt}/{max_retries}] " if max_retries > 1 else ""
                         mark_item(session_local, db_item, ItemStatus.running, f"{action_prefix}Building Dola session")
                         dola_session = await client.build_session()
+                        if not dola_session.has_auth_cookies:
+                            log(session_local, "No auth_cookies.txt or saved Dola auth cookies found; submitting with fresh public Dola cookies only.", "warn", job.id)
                         payload = build_dola_payload(dola_session.payload_template, db_item.prompt, config.get("duration", 15), config.get("ratio", "9:16"))
                         mark_item(session_local, db_item, ItemStatus.running, f"{action_prefix}Submitting Seedance request")
                         conversation_id, conversation_type = await client.submit(dola_session, payload)
@@ -104,6 +106,15 @@ async def process_video(session: Session, job: Job) -> None:
                         mark_item(session_local, db_item, ItemStatus.completed, final_path.name)
                         log(session_local, f"Completed video: {final_path.name}", "success", job.id)
                         return
+                    except DolaSubmissionError as exc:
+                        last_error = str(exc)
+                        log(session_local, format_diagnostic(exc.diagnostic), "error", job.id)
+                        if not exc.diagnostic.get("has_auth_cookies") and "common invalid param" in last_error.lower():
+                            last_error = "Dola rejected Seedance without auth cookies. Add a valid auth cookie file at secrets/dola_auth_cookies or auth_cookies.txt."
+                            break
+                        if attempt < max_retries:
+                            log(session_local, f"Attempt {attempt} failed for '{db_item.prompt[:40]}': {exc}. Retrying...", "warn", job.id)
+                            await asyncio.sleep(3)
                     except Exception as exc:
                         last_error = str(exc)
                         if attempt < max_retries:

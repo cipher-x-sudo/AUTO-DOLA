@@ -6,9 +6,23 @@ import re
 import time
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import httpx
+
+
+AUTH_COOKIE_PATHS = (
+    Path("/run/secrets/dola_auth_cookies"),
+    Path("/data/auth_cookies.txt"),
+    Path("backend/auth_cookies.txt"),
+    Path("auth_cookies.txt"),
+)
+
+ANDROID_WEBVIEW_UA = (
+    "Mozilla/5.0 (Linux; Android 13; SM-S918B Build/TP1A.220624.014; wv) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/118.0.0.0 Mobile Safari/537.36"
+)
 
 
 @dataclass
@@ -16,6 +30,14 @@ class DolaSession:
     url: str
     headers: dict[str, str]
     payload_template: dict[str, Any]
+    has_ttwid: bool
+    has_auth_cookies: bool
+
+
+class DolaSubmissionError(RuntimeError):
+    def __init__(self, message: str, diagnostic: dict[str, Any]) -> None:
+        super().__init__(message)
+        self.diagnostic = diagnostic
 
 
 class DolaClient:
@@ -36,42 +58,53 @@ class DolaClient:
             f"&region={self.region}&samantha_web=1&sys_region={self.region}&tea_uuid={tea_uuid}"
             f"&use-olympus-account=1&version_code=20800&web_id={tea_uuid}&web_tab_id={web_tab_id}"
         )
-        ttwid = await self._fetch_ttwid()
-        cookies = ["i18next=en", f"flow_user_country={self.region}", f"s_v_web_id={fp}"]
-        if ttwid:
-            cookies.append(f"ttwid={ttwid}")
-        if self.auth_cookies:
-            cookies.append(self.auth_cookies)
+        public_cookies = await self._fetch_public_cookies()
+        if not public_cookies.get("ttwid"):
+            raise RuntimeError("Could not establish Dola session: no ttwid cookie.")
+        auth_cookies = read_auth_cookies(self.auth_cookies)
+        merged_cookies = merge_cookies(
+            {"i18next": "en", "flow_user_country": self.region, "s_v_web_id": fp},
+            auth_cookies,
+            public_cookies,
+        )
         headers = {
             "accept": "*/*",
             "agw-js-conv": "str, str",
             "content-type": "application/json",
-            "cookie": "; ".join(cookies),
+            "cookie": format_cookie_header(merged_cookies),
+            "last-event-id": "undefined",
             "origin": "https://www.dola.com",
             "referer": "https://www.dola.com/chat/",
-            "user-agent": "Mozilla/5.0 (Linux; Android 13; SM-S918B) AppleWebKit/537.36 Chrome/118 Mobile Safari/537.36",
+            "user-agent": ANDROID_WEBVIEW_UA,
+            "sec-ch-ua": '"Chromium";v="118", "Android WebView";v="118", "Not=A?Brand";v="99"',
+            "sec-ch-ua-mobile": "?1",
             "sec-ch-ua-platform": '"Android"',
         }
-        return DolaSession(url=url, headers=headers, payload_template=base_payload())
+        return DolaSession(url=url, headers=headers, payload_template=base_payload(), has_ttwid=True, has_auth_cookies=bool(auth_cookies))
 
-    async def _fetch_ttwid(self) -> str | None:
+    async def _fetch_public_cookies(self) -> dict[str, str]:
         try:
-            async with httpx.AsyncClient(timeout=10, verify=False) as client:
+            headers = {
+                "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "user-agent": ANDROID_WEBVIEW_UA,
+                "sec-ch-ua": '"Chromium";v="118", "Android WebView";v="118", "Not=A?Brand";v="99"',
+                "sec-ch-ua-mobile": "?1",
+                "sec-ch-ua-platform": '"Android"',
+            }
+            async with httpx.AsyncClient(timeout=15, verify=False, follow_redirects=True, headers=headers) as client:
                 response = await client.get("https://www.dola.com/")
-                for cookie_header in response.headers.get_list("set-cookie"):
-                    if "ttwid=" in cookie_header:
-                        match = re.match(r"ttwid=([^;]+)", cookie_header)
-                        if match:
-                            return match.group(1)
+                cookies = parse_set_cookie_headers(response.headers.get_list("set-cookie"))
+                cookies.update({key: value for key, value in response.cookies.items()})
+                cookies.update({key: value for key, value in client.cookies.items()})
+                return cookies
         except Exception:
             pass
-        return None
+        return {}
 
     async def submit(self, session: DolaSession, payload: dict[str, Any]) -> tuple[str, int]:
         async with httpx.AsyncClient(timeout=self.timeout, verify=False) as client:
             response = await client.post(session.url, headers=session.headers, json=payload)
-            response.raise_for_status()
-        return parse_conversation_from_stream(response.text)
+        return parse_submit_response(session, payload, response)
 
     async def poll_video_id(self, session: DolaSession, conversation_id: str, conversation_type: int) -> str | None:
         url = session.url.replace("chat/completion", "im/chain/single")
@@ -121,6 +154,18 @@ class DolaClient:
         return None
 
 
+def parse_submit_response(session: DolaSession, payload: dict[str, Any], response: httpx.Response) -> tuple[str, int]:
+    diagnostic = build_submit_diagnostic(session, payload, response)
+    try:
+        response.raise_for_status()
+        return parse_conversation_from_stream(response.text)
+    except Exception as exc:
+        message = str(exc)
+        if "common invalid param" in response.text.lower():
+            message = "Dola rejected the Seedance request: common invalid param."
+        raise DolaSubmissionError(message, diagnostic) from exc
+
+
 def base_payload() -> dict[str, Any]:
     return {
         "client_meta": {"local_conversation_id": f"local_{uuid.uuid4().int % 10000000000000000}", "conversation_id": "", "bot_id": "7339470689562525703", "last_section_id": "", "last_message_index": None},
@@ -129,6 +174,97 @@ def base_payload() -> dict[str, Any]:
         "user_context": {"collect_id": "", "is_audio": False, "answer_with_suggest": False, "tts_switch": False},
         "ext": {"conversation_init_option": '{"need_ack_conversation":true}'},
     }
+
+
+def parse_cookie_text(text: str) -> dict[str, str]:
+    cookies: dict[str, str] = {}
+    for line in text.splitlines():
+        cleaned = line.strip()
+        if not cleaned or cleaned.startswith("#"):
+            continue
+        for part in cleaned.split(";"):
+            if "=" not in part:
+                continue
+            key, value = part.strip().split("=", 1)
+            if key:
+                cookies[key.strip()] = value.strip()
+    return cookies
+
+
+def read_auth_cookies(settings_cookies: str = "", paths: tuple[Path, ...] = AUTH_COOKIE_PATHS) -> dict[str, str]:
+    for path in paths:
+        try:
+            if path.exists() and path.is_file():
+                cookies = parse_cookie_text(path.read_text(encoding="utf-8"))
+                if cookies:
+                    return cookies
+        except OSError:
+            continue
+    return parse_cookie_text(settings_cookies)
+
+
+def parse_set_cookie_headers(headers: list[str]) -> dict[str, str]:
+    cookies: dict[str, str] = {}
+    for header in headers:
+        first = header.split(";", 1)[0].strip()
+        if "=" in first:
+            key, value = first.split("=", 1)
+            cookies[key] = value
+    return cookies
+
+
+def merge_cookies(*sources: dict[str, str]) -> dict[str, str]:
+    merged: dict[str, str] = {}
+    for source in sources:
+        for key, value in source.items():
+            if value:
+                merged[key] = value
+    return merged
+
+
+def format_cookie_header(cookies: dict[str, str]) -> str:
+    return "; ".join(f"{key}={value}" for key, value in cookies.items())
+
+
+def build_submit_diagnostic(session: DolaSession, payload: dict[str, Any], response: httpx.Response) -> dict[str, Any]:
+    ability = payload.get("chat_ability", {})
+    try:
+        ability_param = json.loads(ability.get("ability_param", "{}"))
+    except (TypeError, json.JSONDecodeError):
+        ability_param = {}
+    text = payload["messages"][0]["content_block"][0]["content"]["text_block"]["text"]
+    ratio = text.rsplit(",", 1)[-1].strip() if "," in text else ""
+    return {
+        "status_code": response.status_code,
+        "has_ttwid": session.has_ttwid,
+        "has_auth_cookies": session.has_auth_cookies,
+        "model": ability_param.get("model"),
+        "duration": ability_param.get("duration"),
+        "ratio": ratio,
+        "body_snippet": response.text[:500].replace("\n", " "),
+    }
+
+
+def format_diagnostic(diagnostic: dict[str, Any]) -> str:
+    return (
+        "Dola diagnostic: "
+        f"status={diagnostic.get('status_code')}, "
+        f"ttwid={diagnostic.get('has_ttwid')}, "
+        f"auth_cookies={diagnostic.get('has_auth_cookies')}, "
+        f"model={diagnostic.get('model')}, "
+        f"duration={diagnostic.get('duration')}, "
+        f"ratio={diagnostic.get('ratio')}, "
+        f"body={diagnostic.get('body_snippet')}"
+    )
+
+
+async def dola_session_status(auth_cookies: str = "", region: str = "BD") -> dict[str, Any]:
+    client = DolaClient(auth_cookies=auth_cookies, region=region)
+    try:
+        session = await client.build_session()
+        return {"ok": True, "has_ttwid": session.has_ttwid, "has_auth_cookies": session.has_auth_cookies, "region": region}
+    except Exception as exc:
+        return {"ok": False, "has_ttwid": False, "has_auth_cookies": bool(read_auth_cookies(auth_cookies)), "region": region, "error": str(exc)}
 
 
 def build_dola_payload(template: dict[str, Any], prompt: str, duration: int, ratio: str) -> dict[str, Any]:

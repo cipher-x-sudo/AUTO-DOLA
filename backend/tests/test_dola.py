@@ -1,8 +1,24 @@
 import json
+from pathlib import Path
 
 import pytest
+from httpx import Response
 
-from app.services.dola import base_payload, build_dola_payload, parse_conversation_from_stream, parse_play_info, parse_vid
+from app.services.dola import (
+    ANDROID_WEBVIEW_UA,
+    DolaClient,
+    DolaSubmissionError,
+    base_payload,
+    build_dola_payload,
+    format_cookie_header,
+    merge_cookies,
+    parse_cookie_text,
+    parse_conversation_from_stream,
+    parse_play_info,
+    parse_submit_response,
+    parse_vid,
+    read_auth_cookies,
+)
 
 
 def test_build_payload_includes_seedance_duration_and_prompt() -> None:
@@ -10,6 +26,76 @@ def test_build_payload_includes_seedance_duration_and_prompt() -> None:
     assert payload["messages"][0]["content_block"][0]["content"]["text_block"]["text"] == "Generate video: cinematic city flythrough, 9:16"
     assert payload["chat_ability"]["ability_type"] == 17
     assert json.loads(payload["chat_ability"]["ability_param"]) == {"model": "seedance_v2.0", "duration": 15}
+
+
+def test_cookie_loader_parses_name_value_lines(tmp_path: Path) -> None:
+    path = tmp_path / "auth_cookies.txt"
+    path.write_text("sid=abc\n sessionid = xyz \n# ignored\n", encoding="utf-8")
+
+    assert read_auth_cookies(paths=(path,)) == {"sid": "abc", "sessionid": "xyz"}
+
+
+def test_cookie_loader_parses_raw_cookie_header() -> None:
+    assert parse_cookie_text("sid=abc; sessionid=xyz; ttwid=old") == {"sid": "abc", "sessionid": "xyz", "ttwid": "old"}
+
+
+def test_cookie_merge_replaces_stale_ttwid_and_preserves_auth() -> None:
+    cookies = merge_cookies({"i18next": "en"}, {"sid": "abc", "ttwid": "old"}, {"ttwid": "fresh"})
+
+    assert cookies["sid"] == "abc"
+    assert cookies["ttwid"] == "fresh"
+    assert format_cookie_header(cookies) == "i18next=en; sid=abc; ttwid=fresh"
+
+
+@pytest.mark.asyncio
+async def test_build_session_includes_fresh_cookies_and_webview_headers(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_public_cookies(self: DolaClient) -> dict[str, str]:
+        return {"ttwid": "fresh", "hook_slardar_session_id": "hook"}
+
+    monkeypatch.setattr(DolaClient, "_fetch_public_cookies", fake_public_cookies)
+    session = await DolaClient("sid=abc; ttwid=old").build_session()
+
+    assert "ttwid=fresh" in session.headers["cookie"]
+    assert "hook_slardar_session_id=hook" in session.headers["cookie"]
+    assert "sid=abc" in session.headers["cookie"]
+    assert "s_v_web_id=verify_" in session.headers["cookie"]
+    assert session.headers["user-agent"] == ANDROID_WEBVIEW_UA
+    assert session.headers["sec-ch-ua-mobile"] == "?1"
+    assert session.has_ttwid is True
+    assert session.has_auth_cookies is True
+
+
+@pytest.mark.asyncio
+async def test_build_session_requires_ttwid(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_public_cookies(self: DolaClient) -> dict[str, str]:
+        return {}
+
+    monkeypatch.setattr(DolaClient, "_fetch_public_cookies", fake_public_cookies)
+
+    with pytest.raises(RuntimeError, match="no ttwid cookie"):
+        await DolaClient().build_session()
+
+
+@pytest.mark.asyncio
+async def test_common_invalid_param_has_redacted_diagnostic(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_public_cookies(self: DolaClient) -> dict[str, str]:
+        return {"ttwid": "fresh"}
+
+    monkeypatch.setattr(DolaClient, "_fetch_public_cookies", fake_public_cookies)
+    client = DolaClient("sid=abc")
+    session = await client.build_session()
+    payload = build_dola_payload(session.payload_template, "a swimmer", 15, "9:16")
+
+    with pytest.raises(DolaSubmissionError) as exc_info:
+        parse_submit_response(session, payload, Response(200, text='{"message":"common invalid param"}'))
+
+    diagnostic = exc_info.value.diagnostic
+    assert diagnostic["has_ttwid"] is True
+    assert diagnostic["has_auth_cookies"] is True
+    assert diagnostic["model"] == "seedance_v2.0"
+    assert diagnostic["duration"] == 15
+    assert diagnostic["ratio"] == "9:16"
+    assert "sid=abc" not in diagnostic["body_snippet"]
 
 
 def test_parse_conversation_from_stream() -> None:

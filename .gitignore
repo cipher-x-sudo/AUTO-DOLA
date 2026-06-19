@@ -14,6 +14,9 @@ htmlcov/
 outputs/
 profiles/
 logs/
+secrets/
+auth_cookies.txt
+backend/auth_cookies.txt
 tmp/
 *.sqlite3
 *.db
