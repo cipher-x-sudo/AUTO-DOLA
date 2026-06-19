@@ -43,7 +43,9 @@ export function subscribeJobEvents(
   source.onmessage = (e) => {
     try {
       onMessage(JSON.parse(e.data))
-    } catch {}
+    } catch (error) {
+      console.warn("Ignored malformed job event", error)
+    }
   }
   source.onerror = () => {
     onError?.()

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useState } from "react"
 import { toast } from "sonner"
 import { api, subscribeJobEvents } from "@/lib/api"
 import type { Job, SettingsPayload } from "@/lib/types"
@@ -24,7 +24,7 @@ export default function App() {
   const [settings, setSettings] = useState<SettingsPayload>(emptySettings)
   const [logs, setLogs] = useState<Array<{ id: string; level: string; message: string; created_at: string }>>([])
 
-  async function refresh() {
+  const refresh = useCallback(async () => {
     try {
       const [videoJobs, appSettings, logRows] = await Promise.all([api.videoJobs(), api.settings(), api.logs()])
       setJobs(videoJobs)
@@ -33,13 +33,15 @@ export default function App() {
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Failed to refresh")
     }
-  }
+  }, [])
 
   useEffect(() => {
     refresh()
     const id = setInterval(refresh, 6000)
     return () => clearInterval(id)
-  }, [])
+  }, [refresh])
+
+  const runningJobIds = useMemo(() => jobs.filter((j) => j.status === "running").map((j) => j.id).join(","), [jobs])
 
   useEffect(() => {
     const runningJobs = jobs.filter((j) => j.status === "running")
@@ -52,7 +54,7 @@ export default function App() {
       ),
     )
     return () => cleanups.forEach((c) => c())
-  }, [jobs.filter((j) => j.status === "running").map((j) => j.id).join(",")])
+  }, [jobs, refresh, runningJobIds])
 
   const content = useMemo(() => {
     if (page === "video") return <VideoStudio settings={settings} onCreated={refresh} />
@@ -62,7 +64,7 @@ export default function App() {
     if (page === "logs") return <Logs rows={logs} />
     if (page === "settings") return <SettingsPage settings={settings} setSettings={setSettings} />
     return <Dashboard jobs={jobs} />
-  }, [page, jobs, settings, logs])
+  }, [page, jobs, settings, logs, refresh])
 
   return <Layout page={page} setPage={setPage}>{content}</Layout>
 }
