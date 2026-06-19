@@ -1,0 +1,50 @@
+Tab 1
+Create a natural professional model reference sheet based strictly on the uploaded character image.
+
+
+Use the uploaded image as the MAIN IDENTITY LOCK. Keep the same face, same facial structure, same body proportions, same skin tone, same hairstyle, same hair color, same natural expression, same age appearance, and same overall realism style. Do not beautify, redesign, stylize, or change the person.
+
+
+Create a clean realistic studio reference sheet on a plain light-gray or white background.
+
+
+Layout:
+Top row: 4 full-body standing views:
+1. front view
+2. left side profile
+3. right side profile
+4. back view
+
+
+Bottom row: 3 close-up portrait views:
+1. front face portrait
+2. left profile face portrait
+3. right profile face portrait
+
+
+Character pose:
+Relaxed natural A-pose, arms slightly away from body, neutral calm expression, natural standing posture, bare feet or simple clean footwear if visible in the reference.
+
+
+Visual style:
+Ultra-realistic RAW DSLR photography, natural studio lighting, soft shadows, sharp facial details, realistic skin texture, realistic hair strands, accurate anatomy, clean silhouette, consistent scale, consistent head height, even spacing between panels, print-ready character model sheet.
+
+
+Important:
+Maintain perfect identity consistency across all 7 panels. Same person in every view. No extra people, no text, no logo, no watermark, no cartoon, no CGI, no fashion pose, no dramatic lighting, no exaggerated beauty retouching.
+
+
+Keep the same identity and same reference sheet layout, but change the outfit to: [YOUR OUTFIT DESCRIPTION].
+Tab 2
+
+
+1️⃣ Prompt to create a character reference sheet
+Create a professional character reference sheet based strictly on the uploaded reference image. Use a clean, neutral plain background and present the sheet as a technical model turnaround while matching the exact visual style of the reference (same realism level, rendering approach, texture, color treatment, and overall aesthetic). Arrange the composition into two horizontal rows. Top row: four full-body standing views placed side-by-side in this order: front view, left profile view (facing left), right profile view (facing right), back view. Bottom row: three highly detailed close-up portraits aligned beneath the full-body row in this order: front portrait, left profile portrait (facing left), right profile portrait (facing right). Maintain perfect identity consistency across every panel. Keep the subject in a relaxed A-pose and with consistent scale and alignment between views, accurate anatomy, and clear silhouette; ensure even spacing and clean panel separation, with uniform framing and consistent head height across the full-body lineup and consistent facial scale across the portraits. Lighting should be consistent across all panels (same direction, intensity, and softness), with natural, controlled shadows that preserve detail without dramatic mood shifts. Output a crisp, print-ready reference sheet look, sharp details.
+
+
+2️⃣ No reference image? No problem!
+Create a professional character reference sheet of [PUT YOUR CHARACTER DESCRIPTION HERE]. Use a clean, neutral plain background and present the sheet as a technical model turnaround in a photographic style. Arrange the composition into two horizontal rows. Top row: four full-body standing views placed side-by-side in this order: front view, left profile view (facing left), right profile view (facing right), back view. Bottom row: three highly detailed close-up portraits aligned beneath the full-body row in this order: front portrait, left profile portrait (facing left), right profile portrait (facing right). Maintain perfect identity consistency across every panel. Keep the subject in a relaxed A-pose and with consistent scale and alignment between views, accurate anatomy, and clear silhouette; ensure even spacing and clean panel separation, with uniform framing and consistent head height across the full-body lineup and consistent facial scale across the portraits. Lighting should be consistent across all panels (same direction, intensity, and softness), with natural, controlled shadows that preserve detail without dramatic mood shifts. Output a crisp, print-ready reference sheet look, sharp details.
+
+
+3️⃣ Changing wardrobe in Nano Banana 
+This is a prompt that usually works well for me: "Keep the same character sheet layout. Keep their physical characteristics and expression the same. Change the outfit to [outfit description or reference to image]."

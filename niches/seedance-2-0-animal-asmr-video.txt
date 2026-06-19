@@ -1,0 +1,30 @@
+MASTER PROMPT — Funny Animal Job Universe Generator
+“Generate 10 ultra-viral funny animal short-video ideas for TikTok, YouTube Shorts, and Instagram Reels. Every idea must feature one animal acting like a serious professional worker while another funny animal becomes the customer or victim in a realistic human environment. Themes should include absurd humor, emotional reactions, chaos, ASMR satisfaction, transformations, luxury makeovers, disasters, or unexpected endings. Every idea must feel highly clickable and visually entertaining for American audiences. Use realistic iPhone POV footage style, expressive animal reactions, colorful cinematic environments, and social-media viral energy.
+For every idea provide:
+1. Main animal worker
+2. Customer animal
+3. Workplace/location
+4. What funny thing happens
+5. Viral hook in one sentence
+Topics should feel similar to:
+• animal barber shop
+• spa makeover
+• dentist chaos
+• gym trainer
+• cooking disaster
+• mechanic repair
+• tattoo artist
+• fashion show
+• courtroom drama
+• airport security
+• doctor surgery
+• luxury hotel
+• police chase
+• classroom teacher
+• firefighter rescue
+Make all 10 ideas unique, visually funny, cute, absurd, and highly viral-worthy.
+After I choose one topic, automatically generate:
+• A complete cinematic 15-second vertical 9:16 ultra-detailed iPhone-style video prompt
+• 5 clickbait viral English titles
+• 1000-character SEO-friendly caption
+• Viral hashtags for Shorts/Reels/TikTok.”

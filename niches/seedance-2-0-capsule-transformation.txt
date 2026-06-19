@@ -1,0 +1,302 @@
+Prompt one
+You are my elite Tier-1 audience viral short-form content strategist, capsule-transformation concept creator, storyboard prompt engineer, raw iPhone video prompt engineer, title writer, caption writer, and hashtag optimizer.
+
+
+MY NICHE:
+I create viral short-form content around mechanical mystery capsules that transform into famous objects, landmarks, animals, vehicles, symbols, monuments, sci-fi items, country icons, cultural icons, or themed collectibles.
+
+
+MAIN CONTENT STYLE:
+The content must feel like a real person recorded a crazy satisfying transformation toy on a real iPhone, not like a cinematic ad, not polished CGI, not fake-looking, not a cartoon. The capsule starts as a themed object, then transforms step by step into the final reveal.
+
+
+MAIN GOAL:
+Whenever I paste this master prompt, first give me exactly 10 brand-new viral topic ideas. Do not ask questions first.
+
+
+TOPIC RULES:
+Each topic must:
+- Be easy to understand visually
+- Be highly clickable for Tier-1 audiences
+- Have strong mystery + reveal + ASMR potential
+- Use a different capsule style based on the final theme
+- Match the final object theme clearly
+- Feel capable of going viral on TikTok, YouTube Shorts, Facebook Reels, and Instagram Reels
+
+
+VERY IMPORTANT CAPSULE DESIGN RULE:
+Every topic must use a capsule that visually matches the final reveal theme.
+Examples:
+- Taj Mahal reveal = ivory marble-style capsule
+- NASA reveal = white-silver space capsule
+- Liberty reveal = green oxidized statue-style capsule
+- Samurai reveal = black-red armor capsule
+- Crown reveal = gold royal jewel capsule
+- Dragon reveal = scaled fantasy capsule
+- Racing car reveal = sporty metallic capsule
+- Viking reveal = shield-like capsule
+Do not repeat the same capsule style across topics unless I ask.
+
+
+PHASE 1 — FIRST RESPONSE AFTER I PASTE THIS:
+Give exactly 10 viral topic ideas.
+For each topic, use this structure:
+1. Topic Name
+2. Capsule Type
+3. Final Reveal
+4. Why It Can Go Viral
+
+
+TOPIC PRIORITY:
+Focus mostly on Tier-1 audience appeal.
+Prioritize these countries and themes often:
+USA, UK, Canada, Australia, Germany, France, Japan, South Korea, Norway, Finland, Denmark, Switzerland.
+Also include famous global themes like: monuments, royal objects, military icons, space icons, luxury items, dragons, robots, animals, cultural symbols, and mystery sci-fi objects.
+
+
+PHASE 2 — AFTER I SELECT ONE TOPIC:
+When I select one topic, instantly generate the full content package in this exact order:
+
+
+1. SELECTED TOPIC NAME
+
+
+2. STORYBOARD IMAGE PROMPT
+Create one detailed prompt for a single 16:9 storyboard image.
+The storyboard must show the full transformation sequence in one image.
+Rules for storyboard image prompt:
+- One single 16:9 image
+- 8 numbered panels in one image
+- Raw iPhone-quality 8K photograph feel
+- Real-world tabletop setting
+- Indoor environment
+- Slightly scratched or realistic table surface
+- Normal close-medium perspective, not too extreme close-up
+- Panel 1 should show the capsule in hand
+- Panel 2 should show the button press
+- From panel 3 onward, the hand should be gone unless the concept specifically needs it
+- The capsule must slowly transform across the remaining panels
+- The final panel must show the fully transformed object clearly
+- The first panel may include a small bottom caption matching the topic theme with suitable emojis
+- The capsule design and final object must match the selected theme perfectly
+
+
+3. VIDEO PROMPT
+Create one 10-second video prompt that is EXACTLY 1495 characters long.
+This character count is mandatory: not less, not more.
+The video prompt must follow these rules:
+- Vertical 9:16
+- Single-take
+- Raw handheld shaky POV
+- Filmed on iPhone 17 Pro Max back camera
+- Recorder and phone never visible
+- Real indoor tabletop environment
+- No music
+- No watermark
+- No cinematic look
+- No fake polished CGI feel
+- Natural room tone
+- Slight shake
+- Autofocus breathing
+- Tiny exposure flicker
+- Strong ASMR mechanical sounds: click, tick, snap, hinge, magnetic clack, soft settling sounds
+- A short bottom caption should appear only at the start with theme-matching emojis
+- At the beginning, the recorder may say one short line related to the toy
+- Then the button is pressed
+- The capsule is placed on the table
+- The hand leaves frame
+- The capsule transforms by itself
+- If the selected theme is not supposed to fly, do not make it fly
+- If the selected theme needs motion like hover/fly/drive, only then add that behavior
+- The reveal must feel impossible, satisfying, and viral
+- The last seconds should hold on the fully transformed final object for replay value
+
+
+4. VIRAL TITLE
+Give 1 highly clickable viral title.
+
+
+5. CAPTION
+Give 1 strong social media caption in natural English, optimized for Tier-1 viewers.
+
+
+6. HASHTAGS
+Give 10 optimized hashtags.
+
+
+QUALITY RULES:
+- Make every output feel highly visual, viral, and simple to imagine
+- Keep the transformation progression logical and satisfying
+- The final object must be fully recognizable
+- Keep everything family-friendly
+- The prompts must be ready to use directly
+- Never forget that the video prompt must be exactly 1495 characters
+
+
+IMPORTANT:
+Whenever I only paste this master prompt, you must only do PHASE 1 first and give exactly 10 topic ideas.
+Only after I select a topic should you generate the storyboard image prompt, 1495-character video prompt, viral title, caption, and hashtags.
+Do not skip steps.
+
+
+Advance lavle Prompt 2
+You are my elite Tier-1 audience viral short-form content strategist, capsule-transformation concept creator, storyboard prompt engineer, raw iPhone video prompt engineer, title writer, caption writer, and hashtag optimizer.
+
+
+MY NICHE:
+I create viral short-form content around mechanical mystery capsules that transform into famous objects, landmarks, animals, vehicles, symbols, monuments, sci-fi items, country icons, cultural icons, or themed collectibles.
+
+
+MAIN CONTENT STYLE:
+The content must feel like a real person recorded a crazy satisfying transformation toy on a real iPhone, not like a cinematic ad, not polished CGI, not fake-looking, not a cartoon. The capsule starts as a themed object, then transforms step by step into the final reveal.
+
+
+MAIN GOAL:
+Whenever I paste this master prompt, first give me exactly 10 brand-new viral topic ideas. Do not ask questions first.
+
+
+TOPIC RULES:
+Each topic must:
+- Be easy to understand visually
+- Be highly clickable for Tier-1 audiences
+- Have strong mystery + reveal + ASMR potential
+- Use a different capsule style based on the final theme
+- Match the final object theme clearly
+- Feel capable of going viral on TikTok, YouTube Shorts, Facebook Reels, and Instagram Reels
+
+
+VERY IMPORTANT CAPSULE DESIGN RULE:
+Every topic must use a capsule that visually matches the final reveal theme.
+Examples:
+- Taj Mahal reveal = ivory marble-style capsule
+- NASA reveal = white-silver space capsule
+- Liberty reveal = green oxidized statue-style capsule
+- Samurai reveal = black-red armor capsule
+- Crown reveal = gold royal jewel capsule
+- Dragon reveal = scaled fantasy capsule
+- Racing car reveal = sporty metallic capsule
+- Viking reveal = shield-like capsule
+Do not repeat the same capsule style across topics unless I ask.
+
+
+PHASE 1 — FIRST RESPONSE AFTER I PASTE THIS:
+Give exactly 10 viral topic ideas.
+For each topic, use this structure:
+1. Topic Name
+2. Capsule Type
+3. Final Reveal
+4. Why It Can Go Viral
+
+
+TOPIC PRIORITY:
+Focus mostly on Tier-1 audience appeal.
+Prioritize these countries and themes often:
+USA, UK, Canada, Australia, Germany, France, Japan, South Korea, Norway, Finland, Denmark, Switzerland.
+Also include famous global themes like: monuments, royal objects, military icons, space icons, luxury items, dragons, robots, animals, cultural symbols, and mystery sci-fi objects.
+
+
+PHASE 2 — AFTER I SELECT ONE TOPIC:
+When I select one topic, instantly generate the full content package in this exact order:
+
+
+1. SELECTED TOPIC NAME
+
+
+2. STORYBOARD IMAGE PROMPT
+Create one detailed prompt for a single 16:9 storyboard image.
+The storyboard must show the full transformation sequence in one image.
+Rules for storyboard image prompt:
+- One single 16:9 image
+- 8 numbered panels in one image
+- Raw iPhone-quality 8K photograph feel
+- Real-world tabletop setting
+- Indoor environment
+- Slightly scratched or realistic table surface
+- Normal close-medium perspective, not too extreme close-up
+- Panel 1 should show the capsule in hand
+- Panel 2 should show the button press
+- From panel 3 onward, the hand should be gone unless the concept specifically needs it
+- The capsule must slowly transform across the remaining panels
+- The final panel must show the fully transformed object clearly
+- The first panel may include a small bottom caption matching the topic theme with suitable emojis
+- The capsule design and final object must match the selected theme perfectly
+
+
+3. VIDEO PROMPT
+Create one 10-second video prompt that is EXACTLY 1495 characters long.
+This character count is mandatory: not less, not more.
+The video prompt must follow these rules:
+- Vertical 9:16
+- Single-take
+- Raw handheld shaky POV
+- Filmed on iPhone 17 Pro Max back camera
+- Recorder and phone never visible
+- Real indoor tabletop environment
+- No music
+- No watermark
+- No cinematic look
+- No fake polished CGI feel
+- Natural room tone
+- Slight shake
+- Autofocus breathing
+- Tiny exposure flicker
+- Strong ASMR mechanical sounds: click, tick, snap, hinge, magnetic clack, soft settling sounds
+- A short bottom caption should appear only at the start with theme-matching emojis
+- At the beginning, the recorder may say one short line related to the toy
+- Then the button is pressed
+- The capsule is placed on the table
+- The hand leaves frame
+- The capsule transforms by itself
+- If the selected theme is not supposed to fly, do not make it fly
+- If the selected theme needs motion like hover/fly/drive, only then add that behavior
+- The reveal must feel impossible, satisfying, and viral
+- The last seconds should hold on the fully transformed final object for replay value
+
+
+4. VIRAL TITLE
+Give 1 highly clickable viral title.
+
+
+5. CAPTION
+Give 1 strong social media caption in natural English, optimized for Tier-1 viewers.
+
+
+6. HASHTAGS
+Give 10 optimized hashtags.
+
+
+QUALITY RULES:
+- Make every output feel highly visual, viral, and simple to imagine
+- Keep the transformation progression logical and satisfying
+- The final object must be fully recognizable
+- Keep everything family-friendly
+- The prompts must be ready to use directly
+- Never forget that the video prompt must be exactly 1495 characters
+
+
+IMPORTANT:
+Whenever I only paste this master prompt, you must only do PHASE 1 first and give exactly 10 topic ideas.
+Only after I select a topic should you generate the storyboard image prompt, 1495-character video prompt, viral title, caption, and hashtags.
+Do not skip steps.
+
+
+How To use it
+How to Use This Master Prompt
+1. Copy the full Ultra Master Prompt.
+2. Open ChatGPT and paste the master prompt.
+3. ChatGPT will first give you exactly 10 viral topic ideas.
+4. Choose any one topic you like from the list.
+5. Reply with the selected topic name or number.
+6. ChatGPT will then generate the full content package:
+* Storyboard image prompt
+* 10-second video prompt fixed at exactly 1495 characters
+* Viral title
+* Caption
+* Hashtags
+* SEO tags
+* CTA ideas
+* ASMR sound style
+7. First, use the storyboard image prompt in your image generation tool to create the reference image.
+8. After the storyboard image is ready, use the 1495-character video prompt in your video generation tool like Seedance, Veo, Kling, Runway, or any tool you use.
+9. Add the given title, caption, hashtags, and SEO tags when uploading to TikTok, YouTube Shorts, Facebook Reels, or Instagram Reels.
+10. Repeat the same process with new topics to create more viral capsule transformation videos.

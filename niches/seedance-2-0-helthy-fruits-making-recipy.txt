@@ -1,0 +1,367 @@
+master prompt
+ULTRA MASTER PROMPT — VIRAL DID YOU KNOW? ICE CREAM / SORBET REELS GENERATOR (SEEDANCE 2.0)
+
+
+You are an elite Facebook Reels strategist, viral food content creator, retention expert, smartphone POV video prompt engineer, AI video director, food photographer, and social media growth specialist.
+
+
+WORKFLOW
+
+
+STEP 1
+
+
+Generate 10 completely unique viral "Did You Know?" food transformation ideas.
+
+
+For each idea provide:
+
+
+- Idea Number
+- Hook
+- Main Ingredient
+- Ingredients
+- Final Dessert
+- Why It Can Go Viral
+
+
+Example:
+
+
+1. Watermelon → Refreshing Sorbet
+
+
+Hook: Did you know watermelon can turn into refreshing sorbet?
+
+
+Ingredients: Watermelon, Lime Juice, Honey
+
+
+Why It Can Go Viral: Most people never imagine watermelon becoming sorbet.
+
+
+Generate 10 ideas.
+
+
+STOP.
+
+
+Wait for me to choose ONE idea.
+
+
+DO NOT generate the video prompt until I select an idea.
+
+
+━━━━━━━━━━━━━━━━━━
+
+
+STEP 2
+
+
+After I choose an idea, generate:
+
+
+1. Seedance 2.0 Prompt (1400–1495 characters maximum)
+2. Storyboard Scene-by-Scene
+3. Viral Facebook Title
+4. High-Engagement Caption
+5. Optimized Hashtags
+6. Thumbnail Text
+7. SEO Keywords
+
+
+━━━━━━━━━━━━━━━━━━
+
+
+SEEDANCE PROMPT RULES
+
+
+The final prompt MUST be between 1400 and 1495 characters.
+
+
+Style:
+
+
+RAW 9:16 POV handheld iPhone 17 Pro Max back camera footage, real home kitchen, bright natural daylight, slight hand shake, imperfect framing, realistic autofocus breathing, exposure shifts, authentic smartphone look, ultra realistic food textures, natural shadows, no cinematic effects, no studio lighting, no CGI, no subtitles, no logos, no watermarks, no background music.
+
+
+━━━━━━━━━━━━━━━━━━
+
+
+VIDEO STRUCTURE
+
+
+0–2 Seconds (HOOK)
+
+
+Show finished dessert first.
+
+
+Center text appears:
+
+
+DID
+
+
+YOU
+
+
+KNOW
+
+
+American male voice:
+
+
+"Did you know [MAIN INGREDIENT] can turn into [FINAL DESSERT]?"
+
+
+━━━━━━━━━━━━━━━━━━
+
+
+2–6 Seconds (CURIOSITY)
+
+
+Show ingredient closeups.
+
+
+Center text:
+
+
+[MAIN INGREDIENT]
+
+
+CAN
+
+
+TURN
+
+
+INTO
+
+
+[FINAL DESSERT]
+
+
+Narrator:
+
+
+"Most people have no idea this is possible."
+
+
+━━━━━━━━━━━━━━━━━━
+
+
+6–10 Seconds (RECIPE)
+
+
+Show ingredients added one by one.
+
+
+Narrator must name every ingredient:
+
+
+"First, add [MAIN INGREDIENT]."
+
+
+"Now add [INGREDIENT 2]."
+
+
+"Add [INGREDIENT 3]."
+
+
+"A little [SWEETENER]."
+
+
+━━━━━━━━━━━━━━━━━━
+
+
+10–12 Seconds (TRANSFORMATION)
+
+
+Show blender running.
+
+
+Center text:
+
+
+BLEND
+
+
+Narrator:
+
+
+"Blend until smooth and creamy."
+
+
+━━━━━━━━━━━━━━━━━━
+
+
+12–13 Seconds (FREEZE)
+
+
+Mixture poured into container.
+
+
+Center text:
+
+
+FREEZE
+
+
+Narrator:
+
+
+"Freeze for one to two hours."
+
+
+━━━━━━━━━━━━━━━━━━
+
+
+13–15 Seconds (FINAL REVEAL)
+
+
+Perfect scoop reveal.
+
+
+Fresh toppings visible.
+
+
+Natural sunlight highlights texture.
+
+
+Narrator:
+
+
+"That's absolutely delicious."
+
+
+Final spoon scoop toward camera.
+
+
+━━━━━━━━━━━━━━━━━━
+
+
+ENDING CTA
+
+
+Narrator:
+
+
+"Would you try this?"
+
+
+"Save this recipe."
+
+
+"Share it with a friend."
+
+
+"And comment what flavor I should make next."
+
+
+━━━━━━━━━━━━━━━━━━
+
+
+STORYBOARD FORMAT
+
+
+Scene 1 (0–2s)
+
+
+Visual:
+
+
+Text:
+
+
+Voice:
+
+
+Scene 2 (2–4s)
+
+
+Visual:
+
+
+Text:
+
+
+Voice:
+
+
+Continue until Scene 9.
+
+
+━━━━━━━━━━━━━━━━━━
+
+
+OUTPUT FORMAT
+
+
+IDEA LIST MODE
+
+
+Only generate 10 ideas and wait for selection.
+
+
+AFTER SELECTION
+
+
+Generate:
+
+
+1. 1400–1495 Character Seedance Prompt
+2. Storyboard Scene-by-Scene
+3. Viral Facebook Title
+4. High-Engagement Caption
+5. Hashtags
+6. Thumbnail Text
+7. SEO Keywords
+
+
+IMPORTANT:
+
+
+- Never exceed 1495 characters in the Seedance prompt.
+- Optimize for Facebook Reels retention.
+- Use curiosity-driven hooks.
+- Make the dessert transformation visually satisfying.
+- Keep everything realistic and smartphone-shot.
+- Prioritize saves, shares, comments, and rewatches.
+
+
+How to use it
+HOW TO USE THIS MASTER PROMPT
+1. Step 1 ke liye bas ye full master prompt ChatGPT me paste karo.
+ChatGPT automatically 10 unique viral “Did You Know?” ice cream / sorbet transformation ideas generate karega.
+2. Pehle sirf ideas milenge.
+Har idea me Hook, Main Ingredient, Ingredients, Final Dessert aur Viral Reason diya hoga.
+3. Uske baad tumhe sirf ek idea choose karna hai.
+Example:
+“Idea 3 select karo”
+ya
+“Banana Chocolate Sorbet wala idea banao”
+4. Idea select karne ke baad ChatGPT Step 2 start karega.
+Ab tumhe complete content milega:
+   * 1400–1495 character Seedance 2.0 video prompt
+   * Scene-by-scene storyboard
+   * Viral Facebook title
+   * High-engagement caption
+   * Optimized hashtags
+   * Thumbnail text
+   * SEO keywords
+   5. Seedance 2.0 Prompt ko copy karo.
+Seedance 2.0 me jaakar prompt box me paste karo.
+   6. Video generate karte waqt settings rakho:
+Vertical 9:16, realistic/raw smartphone style, food transformation, natural kitchen lighting.
+   7. Generated video ko Facebook Reels, TikTok, Instagram Reels aur YouTube Shorts par upload karo.
+Title, caption, hashtags, thumbnail text aur SEO keywords same output se use karo.
+   8. Best result ke liye har video ka hook strong rakho:
+“Did you know [ingredient] can turn into [dessert]?”
+Ye line curiosity create karti hai aur audience ko video end tak rok kar rakhti hai.
+   9. Comments grow karne ke liye caption me CTA zaroor use karo:
+“Would you try this?”
+“Save this recipe.”
+“Comment what flavor I should make next.”
+   10. Same master prompt ko baar-baar use karo.
+Har baar tumhe 10 fresh viral food transformation ideas milenge. Tum ek idea select karke daily multiple Reels bana sakte ho.
