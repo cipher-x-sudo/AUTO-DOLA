@@ -62,7 +62,7 @@ async def process_video(session: Session, job: Job) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     client = DolaClient(app_settings.get("dola_auth_cookies", settings.dola_auth_cookies), settings.dola_default_region)
     items = session.exec(select(JobItem).where(JobItem.job_id == job.id)).all()
-    parallel = max(1, min(config.get("parallel", 5), 50))
+    parallel = max(1, int(config.get("parallel", 5)))
     max_retries = config.get("max_retries", 3)
     semaphore = asyncio.Semaphore(parallel)
 

@@ -11,22 +11,22 @@ class PromptItem(BaseModel):
 
 
 class VideoJobCreate(BaseModel):
-    prompts: list[PromptItem] = Field(min_length=1, max_length=50)
+    prompts: list[PromptItem] = Field(min_length=1)
     ratio: str = "9:16"
     duration: int = Field(default=15, ge=5, le=60)
     save_folder: str = ""
-    parallel: int = Field(default=5, ge=1, le=50)
+    parallel: int = Field(default=5, ge=1)
     clean_watermark: bool = True
 
 
 class ImageJobCreate(BaseModel):
-    prompts: list[str] = Field(min_length=1, max_length=100)
+    prompts: list[str] = Field(min_length=1)
     aspect_ratio: str = "1:1"
     output_folder: str = ""
 
 
 class TTSJobCreate(BaseModel):
-    lines: list[str] = Field(min_length=1, max_length=100)
+    lines: list[str] = Field(min_length=1)
     voice: str = "en-US-AriaNeural"
     output_folder: str = ""
 
@@ -89,7 +89,7 @@ class ProxyTestRequest(BaseModel):
 
 class PromptGenerateRequest(BaseModel):
     master_prompt: str = Field(min_length=1)
-    count: int = Field(default=5, ge=1, le=50)
+    count: int = Field(default=5, ge=1)
     duration: int = Field(default=15, ge=5, le=60)
     ratio: str = "9:16"
     style: str = "cinematic realistic"

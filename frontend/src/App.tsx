@@ -392,7 +392,7 @@ function GenerationSettings({
           </Select>
         </Field>
         <Field label="Batch Size">
-          <Input type="number" min={1} max={50} value={parallel} onChange={(event) => setParallel(Number(event.target.value))} />
+          <Input type="number" min={1} value={parallel} onChange={(event) => setParallel(Math.max(1, Number(event.target.value)))} />
         </Field>
         <label className="flex min-h-10 items-center gap-3 rounded-md border border-border bg-background px-3 text-xs font-black uppercase tracking-wide text-muted-foreground sm:col-span-2">
           <input type="checkbox" checked={cleanWatermark} onChange={(event) => setCleanWatermark(event.target.checked)} className="h-4 w-4 accent-[hsl(var(--primary))]" />
@@ -691,7 +691,7 @@ function PromptGenerator({
             </Field>
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <Field label="Prompt count">
-                <Input type="number" min={1} max={50} value={count} onChange={(event) => setCount(clampNumber(Number(event.target.value), 1, 50))} />
+                <Input type="number" min={1} value={count} onChange={(event) => setCount(Math.max(1, Number(event.target.value)))} />
               </Field>
               <Field label="Duration">
                 <Select value={String(duration)} onChange={(event) => setDuration(Number(event.target.value))}>
@@ -839,9 +839,4 @@ function formatBytes(bytes: number) {
   const units = ["B", "KB", "MB", "GB"]
   const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1)
   return `${(bytes / 1024 ** index).toFixed(index === 0 ? 0 : 1)} ${units[index]}`
-}
-
-function clampNumber(value: number, min: number, max: number) {
-  if (Number.isNaN(value)) return min
-  return Math.max(min, Math.min(max, value))
 }
