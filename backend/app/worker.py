@@ -62,6 +62,7 @@ async def process_video(session: Session, job: Job) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     client = DolaClient(app_settings.get("dola_auth_cookies", settings.dola_auth_cookies), settings.dola_default_region)
     items = session.exec(select(JobItem).where(JobItem.job_id == job.id)).all()
+    item_numbers = {item.id: index + 1 for index, item in enumerate(items)}
     parallel = max(1, int(config.get("parallel", 5)))
     max_retries = config.get("max_retries", 3)
     semaphore = asyncio.Semaphore(parallel)
@@ -76,6 +77,11 @@ async def process_video(session: Session, job: Job) -> None:
                     mark_item(session_local, db_item or item, ItemStatus.cancelled, "Cancelled")
                     return
                 last_error = ""
+                video_label = f"Video {item_numbers.get(db_item.id, 0)} | {db_item.id.hex[:8]}"
+
+                def item_log(message: str, level: str = "info") -> None:
+                    log(session_local, f"[{video_label}] {message}", level, job.id)
+
                 def job_cancelled_or_missing() -> bool:
                     current_job = session_local.get(Job, job.id)
                     return current_job is None or current_job.status == JobStatus.cancelled
@@ -102,7 +108,7 @@ async def process_video(session: Session, job: Job) -> None:
                                 logger.warning("Could not persist Dola raw %s response metadata for job %s: %s", response_type, job.id, exc)
 
                         if not dola_session.has_auth_cookies:
-                            log(session_local, "Using anonymous Dola session with fresh public cookies.", "info", job.id)
+                            item_log("Using anonymous Dola session with fresh public cookies.", "info")
                         payload = build_dola_payload(dola_session.payload_template, db_item.prompt, config.get("duration", 15), config.get("ratio", "9:16"))
                         mark_item(session_local, db_item, ItemStatus.running, f"{action_prefix}Submitting Seedance request")
                         submit_result = await client.submit(dola_session, payload, raw_response_fn=record_raw_response, attempt=attempt)
@@ -110,23 +116,18 @@ async def process_video(session: Session, job: Job) -> None:
                         conversation_type = submit_result.conversation_type
                         conversation_hint = conversation_id[-8:] if len(conversation_id) > 8 else conversation_id
                         mark_cookie_snapshot_conversation(session_local, job.id, cookie_snapshot["snapshot_id"], conversation_id, conversation_type)
-                        log(
-                            session_local,
-                            f"Dola accepted Seedance request: conversation_id=*{conversation_hint}, conversation_type={conversation_type}.",
-                            "success",
-                            job.id,
-                        )
+                        item_log(f"Dola accepted Seedance request: conversation_id=*{conversation_hint}, conversation_type={conversation_type}.", "success")
                         for assistant_message in submit_result.assistant_messages:
                             if is_terminal_video_failure(assistant_message):
-                                log(session_local, f"Dola: {assistant_message}", "warn", job.id)
+                                item_log(f"Dola: {assistant_message}", "warn")
                                 raise DolaTerminalGenerationError(f"Dola rejected this prompt: {assistant_message[:500]}")
-                            log(session_local, f"Dola: {assistant_message}", "info", job.id)
+                            item_log(f"Dola: {assistant_message}", "info")
                         mark_item(session_local, db_item, ItemStatus.running, f"{action_prefix}Processing video request")
                         vid = await client.poll_video_id(
                             dola_session,
                             conversation_id,
                             conversation_type,
-                            log_fn=lambda message, level: log(session_local, f"Dola: {message}", level, job.id),
+                            log_fn=lambda message, level: item_log(f"Dola: {message}", level),
                             raw_response_fn=record_raw_response,
                             cancel_fn=job_cancelled_or_missing,
                         )
@@ -155,26 +156,26 @@ async def process_video(session: Session, job: Job) -> None:
                         artifact = Artifact(job_id=job.id, item_id=db_item.id, kind="video", path=str(final_path), filename=final_path.name, mime_type="video/mp4", size_bytes=final_path.stat().st_size)
                         add_artifact(session_local, artifact, db_item)
                         mark_item(session_local, db_item, ItemStatus.completed, final_path.name)
-                        log(session_local, f"Completed video: {final_path.name}", "success", job.id)
+                        item_log(f"Completed video: {final_path.name}", "success")
                         return
                     except DolaSubmissionError as exc:
                         last_error = str(exc)
-                        log(session_local, format_diagnostic(exc.diagnostic), "error", job.id)
+                        item_log(format_diagnostic(exc.diagnostic), "error")
                         if attempt < max_retries:
-                            log(session_local, f"Attempt {attempt} failed for '{db_item.prompt[:40]}': {exc}. Retrying...", "warn", job.id)
+                            item_log(f"Attempt {attempt} failed for '{db_item.prompt[:40]}': {exc}. Retrying...", "warn")
                             await asyncio.sleep(3)
                     except DolaTerminalGenerationError as exc:
                         last_error = str(exc)
                         mark_item(session_local, db_item, ItemStatus.failed, "Prompt flagged", last_error)
-                        log(session_local, last_error, "error", job.id)
+                        item_log(last_error, "error")
                         return
                     except Exception as exc:
                         last_error = str(exc)
                         if attempt < max_retries:
-                            log(session_local, f"Attempt {attempt} failed for '{db_item.prompt[:40]}': {exc}. Retrying...", "warn", job.id)
+                            item_log(f"Attempt {attempt} failed for '{db_item.prompt[:40]}': {exc}. Retrying...", "warn")
                             await asyncio.sleep(3)
                 mark_item(session_local, db_item, ItemStatus.failed, "Failed", last_error)
-                log(session_local, f"Item failed after {max_retries} attempts: {last_error}", "error", job.id)
+                item_log(f"Item failed after {max_retries} attempts: {last_error}", "error")
             finally:
                 session_local.close()
 
