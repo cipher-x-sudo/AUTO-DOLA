@@ -570,6 +570,7 @@ def is_assistant_log_message(text: str) -> bool:
         return False
     lowered = text.lower()
     blocked_fragments = (
+        "generate video:",
         "conversation_id",
         "conversation_type",
         "local_message_id",
@@ -638,9 +639,12 @@ def _extract_text_values(value: Any) -> list[str]:
         text_block = value.get("text_block")
         if isinstance(text_block, dict) and isinstance(text_block.get("text"), str):
             texts.append(text_block["text"])
-        content = value.get("content")
-        if content is not None:
-            texts.extend(_extract_text_values(content))
+        for key in ("content", "message", "data", "delta", "answer"):
+            content = value.get(key)
+            if content is not None and not isinstance(content, str):
+                texts.extend(_extract_text_values(content))
+            elif key == "content" and isinstance(content, str):
+                texts.extend(_extract_text_values(content))
         return texts
     return []
 

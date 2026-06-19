@@ -3,7 +3,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import pytest
-from httpx import Response
+from httpx import Request, Response
 
 from app.services.dola import (
     ANDROID_WEBVIEW_UA,
@@ -206,7 +206,7 @@ def test_parse_submit_response_includes_assistant_messages() -> None:
             has_auth_cookies=False,
         ),
         payload,
-        Response(200, text=response_text),
+        Response(200, text=response_text, request=Request("POST", "https://www.dola.com/chat/completion")),
     )
 
     assert result.conversation_id == "12345"
@@ -221,6 +221,12 @@ def test_parse_assistant_messages_redacts_urls() -> None:
     text = 'data: {"message":{"content":"[{\\"content\\":{\\"text_block\\":{\\"text\\":\\"Download at https://secret.example/signed?token=abc\\"}}}]"}}'
 
     assert parse_assistant_messages_from_stream(text) == ["Download at [redacted-url]"]
+
+
+def test_parse_assistant_messages_ignores_prompt_echo() -> None:
+    text = 'data: {"message":{"content":"[{\\"content\\":{\\"text_block\\":{\\"text\\":\\"Generate video: a man swimming, 9:16\\"}}}]"}}'
+
+    assert parse_assistant_messages_from_stream(text) == []
 
 
 def test_extract_chain_texts_from_nested_message() -> None:
