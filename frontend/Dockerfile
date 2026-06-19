@@ -3,7 +3,7 @@ WORKDIR /app
 ARG VITE_API_BASE=http://localhost:8000
 ENV VITE_API_BASE=$VITE_API_BASE
 COPY package*.json ./
-RUN npm install
+RUN npm ci --no-audit --fetch-retries=5 --fetch-retry-mintimeout=20000 --fetch-retry-maxtimeout=120000
 COPY . .
 RUN npm run build
 
