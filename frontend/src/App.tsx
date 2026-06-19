@@ -57,16 +57,18 @@ const emptySettings: SettingsPayload = {
   tts_default_voice: "en-US-AriaNeural",
 }
 
-type Page = "video" | "prompts" | "history"
+type Page = "video" | "prompts" | "gallery" | "history"
 
 const pageRoutes: Record<Page, string> = {
   video: "/video",
   prompts: "/prompt-generator",
+  gallery: "/gallery",
   history: "/history",
 }
 
 function pageFromPath(pathname: string): Page {
   if (pathname === "/prompt-generator" || pathname === "/prompts") return "prompts"
+  if (pathname === "/gallery") return "gallery"
   if (pathname === "/history") return "history"
   return "video"
 }
@@ -164,7 +166,6 @@ export default function App() {
           settings={settings}
           jobs={jobs}
           activeJob={activeJob}
-          videos={videos}
           logs={recentLogs}
           promptText={studioPromptText}
           setPromptText={setStudioPromptText}
@@ -178,6 +179,7 @@ export default function App() {
           onUsePrompts={(text) => { setStudioPromptText(text); navigate("video") }}
         />
       )}
+      {page === "gallery" && <GalleryPage videos={videos} />}
       {page === "history" && <History jobs={jobs} onRefresh={refresh} />}
     </Layout>
   )
@@ -187,7 +189,6 @@ function VideoConsole({
   settings,
   jobs,
   activeJob,
-  videos,
   logs,
   promptText,
   setPromptText,
@@ -196,7 +197,6 @@ function VideoConsole({
   settings: SettingsPayload
   jobs: Job[]
   activeJob?: Job
-  videos: VideoArtifact[]
   logs: LogRow[]
   promptText: string
   setPromptText: (value: string) => void
@@ -224,9 +224,9 @@ function VideoConsole({
       generating: items.filter((item) => item.status === "running").length,
       done: items.filter((item) => item.status === "completed").length,
       failed: items.filter((item) => item.status === "failed").length,
-      videos: videos.length,
+      videos: collectVideoArtifacts(jobs).length,
     }
-  }, [jobs, videos])
+  }, [jobs])
 
   const progressTotal = activeJob?.total || stats.total || 0
   const progressDone = activeJob ? activeJob.done + activeJob.failed : stats.done + stats.failed
@@ -320,7 +320,6 @@ function VideoConsole({
         </div>
       </section>
 
-      <VideoGallery videos={videos} />
     </div>
   )
 }
@@ -539,6 +538,20 @@ function isStudioLogVisible(row: LogRow) {
   if (message.startsWith("Could not persist RAW ")) return false
   if (message.includes("No Dola video id found yet")) return false
   return true
+}
+
+function GalleryPage({ videos }: { videos: VideoArtifact[] }) {
+  return (
+    <div className="mx-auto max-w-[1760px] space-y-5">
+      <div className="flex flex-col gap-3 border-b border-border/70 pb-4 lg:flex-row lg:items-center lg:justify-between">
+        <div>
+          <h1 className="text-xl font-black tracking-tight sm:text-2xl">Video Gallery</h1>
+          <p className="mt-1 text-xs font-semibold text-muted-foreground">Playable MP4 outputs from completed Seedance jobs.</p>
+        </div>
+      </div>
+      <VideoGallery videos={videos} />
+    </div>
+  )
 }
 
 function VideoGallery({ videos }: { videos: VideoArtifact[] }) {

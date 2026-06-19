@@ -1,9 +1,10 @@
-import { FileVideo, History, Loader2, Moon, Sparkles, Wand2 } from "lucide-react"
+import { FileVideo, GalleryHorizontalEnd, History, Loader2, Moon, Sparkles, Wand2 } from "lucide-react"
 import { Button } from "./ui"
 
 const nav = [
   ["video", "/video", FileVideo, "Video Studio"],
   ["prompts", "/prompt-generator", Wand2, "Prompt Generator"],
+  ["gallery", "/gallery", GalleryHorizontalEnd, "Gallery"],
   ["history", "/history", History, "History"],
 ] as const
 
