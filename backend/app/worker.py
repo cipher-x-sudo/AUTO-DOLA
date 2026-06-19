@@ -13,11 +13,12 @@ from sqlmodel import Session, select
 from app.config import settings
 from app.database import engine, init_db
 from app.models import Artifact, ItemStatus, Job, JobItem, JobKind, JobStatus, utcnow
-from app.services.cookie_snapshots import create_cookie_snapshot, mark_cookie_snapshot_conversation
+from app.services.cookie_snapshots import append_raw_response_event, create_cookie_snapshot, mark_cookie_snapshot_conversation
 from app.services.dola import DolaClient, DolaSubmissionError, build_dola_payload, format_diagnostic
 from app.services.images import generate_image
 from app.services.jobs import add_artifact, log, mark_item, recompute_job
 from app.services.media import clean_video, safe_filename
+from app.services.raw_responses import format_raw_response_logs
 from app.services.settings import load_public_settings
 from app.services.tts import synthesize
 
@@ -79,11 +80,28 @@ async def process_video(session: Session, job: Job) -> None:
                         mark_item(session_local, db_item, ItemStatus.running, f"{action_prefix}Building Dola session")
                         dola_session = await client.build_session()
                         cookie_snapshot = create_cookie_snapshot(session_local, job.id, db_item.id, attempt, dola_session)
+
+                        def record_raw_response(response_type: str, response_attempt: int, status_code: int, body: str) -> None:
+                            try:
+                                append_raw_response_event(
+                                    session_local,
+                                    job.id,
+                                    cookie_snapshot["snapshot_id"],
+                                    response_type,
+                                    response_attempt,
+                                    status_code,
+                                    body,
+                                )
+                            except Exception as exc:
+                                log(session_local, f"Could not persist RAW {response_type} response metadata: {exc}", "warn", job.id)
+                            for line in format_raw_response_logs(response_type, response_attempt, status_code, body):
+                                log(session_local, line, "info", job.id)
+
                         if not dola_session.has_auth_cookies:
                             log(session_local, "Using anonymous Dola session with fresh public cookies.", "info", job.id)
                         payload = build_dola_payload(dola_session.payload_template, db_item.prompt, config.get("duration", 15), config.get("ratio", "9:16"))
                         mark_item(session_local, db_item, ItemStatus.running, f"{action_prefix}Submitting Seedance request")
-                        submit_result = await client.submit(dola_session, payload)
+                        submit_result = await client.submit(dola_session, payload, raw_response_fn=record_raw_response, attempt=attempt)
                         conversation_id = submit_result.conversation_id
                         conversation_type = submit_result.conversation_type
                         conversation_hint = conversation_id[-8:] if len(conversation_id) > 8 else conversation_id
@@ -102,11 +120,16 @@ async def process_video(session: Session, job: Job) -> None:
                             conversation_id,
                             conversation_type,
                             log_fn=lambda message, level: log(session_local, f"Dola: {message}", level, job.id),
+                            raw_response_fn=record_raw_response,
+                            cancel_fn=lambda: (session_local.get(Job, job.id) or job).status == JobStatus.cancelled,
                         )
+                        if (session_local.get(Job, job.id) or job).status == JobStatus.cancelled:
+                            mark_item(session_local, db_item, ItemStatus.cancelled, "Cancelled")
+                            return
                         if not vid:
                             raise RuntimeError("Timed out waiting for Dola video id.")
                         mark_item(session_local, db_item, ItemStatus.running, f"{action_prefix}Polling download URL")
-                        download_url = await client.poll_download_url(dola_session, vid)
+                        download_url = await client.poll_download_url(dola_session, vid, raw_response_fn=record_raw_response)
                         if not download_url:
                             raise RuntimeError("Timed out waiting for video download URL.")
                         filename = safe_filename(db_item.title or f"video-{db_item.id.hex[:8]}")

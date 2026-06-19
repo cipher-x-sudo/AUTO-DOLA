@@ -13,6 +13,7 @@ from app.services.dola import (
     PAYLOAD_TEMPLATE_VERSION,
     base_payload,
     build_dola_payload,
+    build_chain_poll_body,
     format_cookie_header,
     merge_cookies,
     parse_cookie_text,
@@ -22,9 +23,11 @@ from app.services.dola import (
     parse_play_info,
     parse_submit_response,
     parse_vid,
+    parse_vid_with_diagnostics,
     extract_chain_texts,
     read_auth_cookies,
 )
+from app.services.raw_responses import split_response_body
 
 
 def test_build_payload_includes_seedance_duration_and_prompt() -> None:
@@ -57,6 +60,26 @@ def test_base_payload_matches_browser_shape() -> None:
         "disable_sse_cache",
         "message_storage_type",
     }.issubset(payload["option"])
+
+
+def test_chain_poll_body_matches_dola_history_shape() -> None:
+    body = build_chain_poll_body("12345", 3)
+
+    assert body["cmd"] == 3100
+    assert body["channel"] == 2
+    assert body["version"] == "1"
+    uplink = body["uplink_body"]["pull_singe_chain_uplink_body"]
+    assert uplink == {
+        "conversation_id": "12345",
+        "anchor_index": 0,
+        "conversation_type": 3,
+        "direction": 3,
+        "limit": 50,
+        "ext": {},
+        "filter": {"index_list": []},
+        "evaluate_ab_params": "",
+        "evaluate_common_params": "",
+    }
 
 
 def test_cookie_loader_parses_name_value_lines(tmp_path: Path) -> None:
@@ -261,6 +284,49 @@ def test_parse_conversation_errors() -> None:
 
 def test_parse_vid() -> None:
     assert parse_vid({"code": 0, "data": {"nested": {"vid": "abc_123"}}}) == "abc_123"
+
+
+def test_parse_vid_from_nested_message_content_string() -> None:
+    payload = {
+        "code": 0,
+        "data": {
+            "pull_singe_chain_uplink_body": {
+                "messages": [
+                    {
+                        "content": json.dumps(
+                            {
+                                "cards": [
+                                    {
+                                        "video": {
+                                            "vid": "nested_vid_123",
+                                        }
+                                    }
+                                ]
+                            }
+                        )
+                    }
+                ]
+            }
+        },
+    }
+
+    assert parse_vid(payload) == "nested_vid_123"
+
+
+def test_parse_vid_reports_checked_paths_when_missing() -> None:
+    vid, checked_paths = parse_vid_with_diagnostics({"code": 0, "data": {"messages": []}})
+
+    assert vid is None
+    assert "full JSON string" in checked_paths
+    assert "data.pull_singe_chain_uplink_body.messages" in checked_paths
+    assert "downlink_body.pull_singe_chain_downlink_body.messages" in checked_paths
+    assert "recursive JSON/string scan" in checked_paths
+
+
+def test_raw_response_chunking_preserves_original_body() -> None:
+    body = "abc123" * 2000
+
+    assert "".join(split_response_body(body, 101)) == body
 
 
 def test_parse_play_info() -> None:

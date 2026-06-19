@@ -6,6 +6,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 from uuid import UUID, uuid4
 
+from sqlalchemy.orm.attributes import flag_modified
 from sqlmodel import Session
 
 from app.config import settings
@@ -36,7 +37,7 @@ def create_cookie_snapshot(
     cookie_names = cookie_names_from_header(cookie_header)
     snapshot_id = str(uuid4())
     created_at = utcnow()
-    path = snapshot_root(base_dir) / f"{job_id}-{item_id}-{attempt}-{snapshot_id}.json.enc"
+    path = (snapshot_root(base_dir) / f"{job_id}-{item_id}-{attempt}-{snapshot_id}.json.enc").resolve()
     payload = {
         "snapshot_id": snapshot_id,
         "job_id": str(job_id),
@@ -68,6 +69,7 @@ def create_cookie_snapshot(
         "region": settings.dola_default_region,
         "conversation_id_masked": None,
         "conversation_type": None,
+        "raw_response_events": [],
     }
     append_cookie_snapshot_metadata(session, job_id, metadata)
     return metadata
@@ -79,10 +81,7 @@ def append_cookie_snapshot_metadata(session: Session, job_id: UUID, metadata: di
         raise ValueError(f"Job {job_id} not found")
     snapshots = list(job.dola_cookie_snapshots_json or [])
     snapshots.append(metadata)
-    job.dola_cookie_snapshots_json = snapshots
-    job.updated_at = utcnow()
-    session.add(job)
-    session.commit()
+    save_job_snapshots(session, job, snapshots)
 
 
 def mark_cookie_snapshot_conversation(session: Session, job_id: UUID, snapshot_id: str, conversation_id: str, conversation_type: int) -> None:
@@ -96,7 +95,61 @@ def mark_cookie_snapshot_conversation(session: Session, job_id: UUID, snapshot_i
             snapshot["conversation_type"] = conversation_type
             snapshot["conversation_recorded_at"] = utcnow().isoformat()
             break
+    save_job_snapshots(session, job, snapshots)
+
+
+def append_raw_response_event(
+    session: Session,
+    job_id: UUID,
+    snapshot_id: str,
+    response_type: str,
+    attempt: int,
+    status_code: int,
+    body: str,
+) -> dict[str, Any]:
+    job = session.get(Job, job_id)
+    if not job:
+        raise ValueError(f"Job {job_id} not found")
+
+    created_at = utcnow()
+    body_bytes = body.encode("utf-8")
+    event_metadata = {
+        "response_type": response_type,
+        "attempt": attempt,
+        "status_code": status_code,
+        "body_sha256": hashlib.sha256(body_bytes).hexdigest(),
+        "body_bytes": len(body_bytes),
+        "created_at": created_at.isoformat(),
+        "snapshot_id": snapshot_id,
+    }
+
+    snapshots = list(job.dola_cookie_snapshots_json or [])
+    target_snapshot: dict[str, Any] | None = None
+    for snapshot in snapshots:
+        if snapshot.get("snapshot_id") == snapshot_id:
+            target_snapshot = snapshot
+            break
+    if target_snapshot is None:
+        raise ValueError(f"Cookie snapshot {snapshot_id} not found for job {job_id}")
+
+    events = list(target_snapshot.get("raw_response_events") or [])
+    event_metadata["event_index"] = len(events) + 1
+    events.append(event_metadata)
+    target_snapshot["raw_response_events"] = events
+
+    payload = read_cookie_snapshot(target_snapshot)
+    payload_events = list(payload.get("raw_response_events") or [])
+    payload_events.append({**event_metadata, "body": body})
+    payload["raw_response_events"] = payload_events
+    Path(str(target_snapshot["encrypted_file_path"])).write_text(encrypt_value(payload), encoding="utf-8")
+
+    save_job_snapshots(session, job, snapshots)
+    return event_metadata
+
+
+def save_job_snapshots(session: Session, job: Job, snapshots: list[dict[str, Any]]) -> None:
     job.dola_cookie_snapshots_json = snapshots
+    flag_modified(job, "dola_cookie_snapshots_json")
     job.updated_at = utcnow()
     session.add(job)
     session.commit()

@@ -28,6 +28,9 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://autodola:autodola@postgres:5432/autodola
       REDIS_URL: redis://redis:6379/0
+      OUTPUT_DIR: /data/outputs
+      PROFILE_DIR: /data/profiles
+      LOG_DIR: /data/logs
     ports:
       - "8000:8000"
     volumes:
@@ -51,6 +54,9 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://autodola:autodola@postgres:5432/autodola
       REDIS_URL: redis://redis:6379/0
+      OUTPUT_DIR: /data/outputs
+      PROFILE_DIR: /data/profiles
+      LOG_DIR: /data/logs
     volumes:
       - auto_dola_outputs:/data/outputs
       - auto_dola_profiles:/data/profiles

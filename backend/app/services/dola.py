@@ -25,7 +25,7 @@ ANDROID_WEBVIEW_UA = (
     "AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/118.0.0.0 Mobile Safari/537.36"
 )
 PAYLOAD_TEMPLATE_VERSION = "browser-2026-06-19"
-VIDEO_POLL_ATTEMPTS = 72
+VIDEO_POLL_ATTEMPTS = 250
 VIDEO_POLL_INTERVAL_SECONDS = 5
 VIDEO_FAILURE_MARKERS = (
     "failed to generate",
@@ -142,9 +142,18 @@ class DolaClient:
             pass
         return {}
 
-    async def submit(self, session: DolaSession, payload: dict[str, Any]) -> DolaSubmitResult:
+    async def submit(
+        self,
+        session: DolaSession,
+        payload: dict[str, Any],
+        *,
+        raw_response_fn: Callable[[str, int, int, str], None] | None = None,
+        attempt: int = 1,
+    ) -> DolaSubmitResult:
         async with httpx.AsyncClient(timeout=self.timeout, verify=False) as client:
             response = await client.post(session.url, headers=session.headers, json=payload)
+        if raw_response_fn:
+            raw_response_fn("submit", attempt, response.status_code, response.text)
         return parse_submit_response(session, payload, response)
 
     async def poll_video_id(
@@ -156,36 +165,30 @@ class DolaClient:
         max_attempts: int = VIDEO_POLL_ATTEMPTS,
         sleep_seconds: float = VIDEO_POLL_INTERVAL_SECONDS,
         log_fn: Callable[[str, str], None] | None = None,
+        raw_response_fn: Callable[[str, int, int, str], None] | None = None,
+        cancel_fn: Callable[[], bool] | None = None,
     ) -> str | None:
         url = session.url.replace("chat/completion", "im/chain/single")
         headers = {k: v for k, v in session.headers.items() if k.lower() not in {"content-type", "accept-encoding", "agw-js-conv"}}
         headers["content-type"] = "application/json; encoding=utf-8"
         headers["agw-js-conv"] = "str"
-        body = {
-            "cmd": "1",
-            "channel": 2,
-            "version": "1",
-            "sequence_id": str(uuid.uuid4()),
-            "uplink_body": {
-                "conversation_id": conversation_id,
-                "conversation_type": conversation_type,
-                "anchor_index": 500,
-                "direction": 1,
-                "limit": 20,
-                "ext": {"pull_single_chain_scene": "multi_device_red_dot_sync"},
-                "filter": {"index_list": []},
-                "evaluate_ab_params": "",
-                "evaluate_common_params": {},
-            },
-        }
+        body = build_chain_poll_body(conversation_id, conversation_type)
         seen_messages: set[str] = set()
         async with httpx.AsyncClient(timeout=self.timeout, verify=False) as client:
             for attempt in range(1, max_attempts + 1):
+                if cancel_fn and cancel_fn():
+                    if log_fn:
+                        log_fn("Video polling cancelled.", "warn")
+                    return None
+                if log_fn:
+                    log_fn(f"Processing video request (attempt {attempt}/{max_attempts})...", "info")
                 body["sequence_id"] = str(uuid.uuid4())
                 response = await client.post(url, headers=headers, json=body)
+                if raw_response_fn:
+                    raw_response_fn("chain_poll", attempt, response.status_code, response.text)
                 if response.status_code == 200:
                     payload = response.json()
-                    vid = parse_vid(payload)
+                    vid, checked_paths = parse_vid_with_diagnostics(payload)
                     if vid:
                         if log_fn:
                             log_fn("Dola returned video id.", "success")
@@ -199,21 +202,28 @@ class DolaClient:
                                 log_fn(message[:500], level)
                         if is_terminal_video_failure(message):
                             raise RuntimeError(f"Dola did not continue video generation: {message[:500]}")
+                    if log_fn:
+                        log_fn(f"No Dola video id found yet. Checked paths: {', '.join(checked_paths)}.", "debug")
                 elif log_fn and attempt == 1:
                     log_fn(f"Dola chain poll returned HTTP {response.status_code}.", "warn")
-
-                if log_fn and attempt % 6 == 0:
-                    log_fn(f"Still waiting for Dola video id ({attempt}/{max_attempts}).", "info")
                 await asyncio.sleep(sleep_seconds)
         return None
 
-    async def poll_download_url(self, session: DolaSession, vid: str) -> str | None:
+    async def poll_download_url(
+        self,
+        session: DolaSession,
+        vid: str,
+        *,
+        raw_response_fn: Callable[[str, int, int, str], None] | None = None,
+    ) -> str | None:
         url = session.url.replace("chat/completion", "samantha/video/get_play_info")
         headers = {k: v for k, v in session.headers.items() if k.lower() not in {"content-type", "accept-encoding"}}
         headers["content-type"] = "application/json"
         async with httpx.AsyncClient(timeout=self.timeout, verify=False) as client:
-            for _ in range(200):
+            for attempt in range(1, 201):
                 response = await client.post(url, headers=headers, json={"vid": vid})
+                if raw_response_fn:
+                    raw_response_fn("play_info", attempt, response.status_code, response.text)
                 if response.status_code == 200:
                     download_url = parse_play_info(response.json())
                     if download_url:
@@ -496,6 +506,28 @@ def build_dola_payload(template: dict[str, Any], prompt: str, duration: int, rat
     return payload
 
 
+def build_chain_poll_body(conversation_id: str, conversation_type: int) -> dict[str, Any]:
+    return {
+        "cmd": 3100,
+        "uplink_body": {
+            "pull_singe_chain_uplink_body": {
+                "conversation_id": conversation_id,
+                "anchor_index": 0,
+                "conversation_type": conversation_type,
+                "direction": 3,
+                "limit": 50,
+                "ext": {},
+                "filter": {"index_list": []},
+                "evaluate_ab_params": "",
+                "evaluate_common_params": "",
+            }
+        },
+        "sequence_id": str(uuid.uuid4()),
+        "channel": 2,
+        "version": "1",
+    }
+
+
 def parse_conversation_from_stream(text: str) -> tuple[str, int]:
     conversation_match = re.search(r'"conversation_id"\s*:\s*"([0-9]+)"', text)
     if not conversation_match:
@@ -582,10 +614,71 @@ def is_assistant_log_message(text: str) -> bool:
 
 
 def parse_vid(payload: dict[str, Any]) -> str | None:
+    vid, _ = parse_vid_with_diagnostics(payload)
+    return vid
+
+
+def parse_vid_with_diagnostics(payload: dict[str, Any]) -> tuple[str | None, list[str]]:
     if payload.get("code", 0) != 0:
         raise RuntimeError(f"Dola API error code {payload.get('code')}: {payload.get('message', 'Unknown error')}")
-    match = re.search(r'"vid"\s*:\s*"([a-zA-Z0-9_]+)"', json.dumps(payload))
-    return match.group(1) if match else None
+    checked_paths = ["full JSON string"]
+    match = re.search(r'"vid"\s*:\s*"([a-zA-Z0-9_:-]+)"', json.dumps(payload))
+    if match:
+        return match.group(1), checked_paths
+
+    known_paths = (
+        ("data.pull_singe_chain_uplink_body.messages", _get_path(payload, ("data", "pull_singe_chain_uplink_body", "messages"))),
+        (
+            "downlink_body.pull_singe_chain_downlink_body.messages",
+            _get_path(payload, ("downlink_body", "pull_singe_chain_downlink_body", "messages")),
+        ),
+        (
+            "data.downlink_body.pull_singe_chain_downlink_body.messages",
+            _get_path(payload, ("data", "downlink_body", "pull_singe_chain_downlink_body", "messages")),
+        ),
+    )
+    for path, value in known_paths:
+        checked_paths.append(path)
+        vid = _find_vid_recursive(value)
+        if vid:
+            return vid, checked_paths
+
+    checked_paths.append("recursive JSON/string scan")
+    return _find_vid_recursive(payload), checked_paths
+
+
+def _get_path(value: Any, path: tuple[str, ...]) -> Any:
+    current = value
+    for key in path:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current
+
+
+def _find_vid_recursive(value: Any) -> str | None:
+    if isinstance(value, str):
+        match = re.search(r'"vid"\s*:\s*"([a-zA-Z0-9_:-]+)"', value)
+        if match:
+            return match.group(1)
+        try:
+            return _find_vid_recursive(json.loads(value))
+        except json.JSONDecodeError:
+            return None
+    if isinstance(value, list):
+        for item in value:
+            vid = _find_vid_recursive(item)
+            if vid:
+                return vid
+    if isinstance(value, dict):
+        vid_value = value.get("vid")
+        if isinstance(vid_value, str) and vid_value:
+            return vid_value
+        for child in value.values():
+            vid = _find_vid_recursive(child)
+            if vid:
+                return vid
+    return None
 
 
 def extract_chain_texts(payload: dict[str, Any]) -> list[str]:
