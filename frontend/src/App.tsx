@@ -19,7 +19,7 @@ import {
 } from "lucide-react"
 import { toast } from "sonner"
 import { api, artifactUrl, subscribeJobEvents } from "@/lib/api"
-import type { Artifact, Job, JobItem, SettingsPayload } from "@/lib/types"
+import type { Artifact, Job, JobItem, Niche, NichePromptGroup, SettingsPayload } from "@/lib/types"
 import { Layout } from "@/components/Layout"
 import { JobTable } from "@/components/JobTable"
 import { Badge, Button, Card, Input, Progress, Select, Textarea } from "@/components/ui"
@@ -605,26 +605,67 @@ function PromptGenerator({
   onSettingsSaved: (settings: SettingsPayload) => void
   onUsePrompts: (text: string) => void
 }) {
+  const [sourceMode, setSourceMode] = useState<"manual" | "niches">("manual")
   const [idea, setIdea] = useState("")
   const [count, setCount] = useState(5)
+  const [countMode, setCountMode] = useState<"global" | "per_niche">("global")
   const [duration, setDuration] = useState(15)
   const [apiKey, setApiKey] = useState(settings.gemini_api_key || "")
   const [baseUrl, setBaseUrl] = useState(settings.gemini_base_url || "https://generativelanguage.googleapis.com/v1beta")
   const [model, setModel] = useState(settings.gemini_model || "gemini-2.5-flash")
+  const [niches, setNiches] = useState<Niche[]>([])
+  const [loadingNiches, setLoadingNiches] = useState(false)
+  const [nicheSearch, setNicheSearch] = useState("")
+  const [selectedNicheIds, setSelectedNicheIds] = useState<string[]>([])
   const [generated, setGenerated] = useState<string[]>([])
+  const [generatedGroups, setGeneratedGroups] = useState<NichePromptGroup[]>([])
   const [generating, setGenerating] = useState(false)
   const [generationTarget, setGenerationTarget] = useState(0)
+  const [currentProgressLabel, setCurrentProgressLabel] = useState("")
   const [savingSettings, setSavingSettings] = useState(false)
-  const [copied, setCopied] = useState<number | "all" | null>(null)
+  const [copied, setCopied] = useState<number | string | null>(null)
 
-  const generatedText = generated.join("\n")
-  const generationProgress = generationTarget ? Math.min(100, Math.round((generated.length / generationTarget) * 100)) : 0
+  const allGeneratedPrompts = useMemo(() => (generatedGroups.length ? generatedGroups.flatMap((group) => group.prompts) : generated), [generated, generatedGroups])
+  const generatedText = allGeneratedPrompts.join("\n")
+  const generatedDownloadText = useMemo(
+    () =>
+      generatedGroups.length
+        ? generatedGroups
+            .map((group) => [`## ${group.niche_name}`, ...group.prompts.map((prompt, index) => `${index + 1}. ${prompt}`)].join("\n"))
+            .join("\n\n")
+        : generated.map((prompt, index) => `${index + 1}. ${prompt}`).join("\n\n"),
+    [generated, generatedGroups],
+  )
+  const generationProgress = generationTarget ? Math.min(100, Math.round((allGeneratedPrompts.length / generationTarget) * 100)) : 0
+  const filteredNiches = useMemo(() => {
+    const query = nicheSearch.trim().toLowerCase()
+    if (!query) return niches
+    return niches.filter((niche) => `${niche.name} ${niche.filename}`.toLowerCase().includes(query))
+  }, [nicheSearch, niches])
+  const selectedNiches = useMemo(() => niches.filter((niche) => selectedNicheIds.includes(niche.id)), [niches, selectedNicheIds])
+  const expectedPromptTotal = sourceMode === "niches" && countMode === "per_niche" ? count * selectedNicheIds.length : count
 
   useEffect(() => {
     setApiKey(settings.gemini_api_key || "")
     setBaseUrl(settings.gemini_base_url || "https://generativelanguage.googleapis.com/v1beta")
     setModel(settings.gemini_model || "gemini-2.5-flash")
   }, [settings])
+
+  useEffect(() => {
+    let alive = true
+    setLoadingNiches(true)
+    api.niches()
+      .then((rows) => {
+        if (alive) setNiches(rows)
+      })
+      .catch((error) => toast.error(error instanceof Error ? error.message : "Failed to load niches"))
+      .finally(() => {
+        if (alive) setLoadingNiches(false)
+      })
+    return () => {
+      alive = false
+    }
+  }, [])
 
   async function saveGeminiSettings() {
     setSavingSettings(true)
@@ -641,6 +682,14 @@ function PromptGenerator({
   }
 
   async function generate() {
+    if (sourceMode === "niches") {
+      await generateFromNiches()
+      return
+    }
+    await generateFromManualIdea()
+  }
+
+  async function generateFromManualIdea() {
     if (!idea.trim()) {
       toast.error("Add a master idea first.")
       return
@@ -651,7 +700,9 @@ function PromptGenerator({
     }
     setGenerating(true)
     setGenerated([])
+    setGeneratedGroups([])
     setGenerationTarget(count)
+    setCurrentProgressLabel("Manual idea batches")
     try {
       const saved = await api.saveSettings({ ...settings, gemini_api_key: apiKey, gemini_base_url: baseUrl, gemini_model: model })
       onSettingsSaved(saved)
@@ -683,18 +734,69 @@ function PromptGenerator({
     } finally {
       setGenerating(false)
       setGenerationTarget(0)
+      setCurrentProgressLabel("")
     }
   }
 
-  async function copyText(text: string, index: number | "all") {
+  async function generateFromNiches() {
+    if (!selectedNicheIds.length) {
+      toast.error("Select at least one niche.")
+      return
+    }
+    if (countMode === "global" && count < selectedNicheIds.length) {
+      toast.error("Global prompt count must be at least the selected niche count.")
+      return
+    }
+    if (!apiKey.trim()) {
+      toast.error("Add and save your Gemini API key first.")
+      return
+    }
+    const counts = countMode === "per_niche" ? selectedNiches.map(() => count) : splitPromptCount(count, selectedNiches.length)
+    setGenerating(true)
+    setGenerated([])
+    setGeneratedGroups([])
+    setGenerationTarget(counts.reduce((total, item) => total + item, 0))
+    try {
+      const saved = await api.saveSettings({ ...settings, gemini_api_key: apiKey, gemini_base_url: baseUrl, gemini_model: model })
+      onSettingsSaved(saved)
+      let resultModel = model
+      for (let index = 0; index < selectedNiches.length; index += 1) {
+        const niche = selectedNiches[index]
+        const promptCount = counts[index]
+        setCurrentProgressLabel(`${niche.name}: 0/${promptCount}`)
+        const result = await api.generateNichePrompts({
+          niche_ids: [niche.id],
+          count: promptCount,
+          count_mode: "per_niche",
+          duration,
+          style: "cinematic realistic",
+        })
+        resultModel = result.model
+        const group = result.groups[0]
+        if (group) {
+          setGeneratedGroups((current) => [...current, group])
+          setCurrentProgressLabel(`${niche.name}: ${group.prompts.length}/${promptCount}`)
+        }
+      }
+      toast.success(`Generated niche prompts with ${resultModel}`)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to generate niche prompts")
+    } finally {
+      setGenerating(false)
+      setGenerationTarget(0)
+      setCurrentProgressLabel("")
+    }
+  }
+
+  async function copyText(text: string, index: number | string) {
     await navigator.clipboard.writeText(text)
     setCopied(index)
     setTimeout(() => setCopied(null), 1400)
   }
 
   function downloadPrompts() {
-    if (!generated.length) return
-    const blob = new Blob([generated.map((prompt, index) => `${index + 1}. ${prompt}`).join("\n\n")], { type: "text/plain" })
+    if (!allGeneratedPrompts.length) return
+    const blob = new Blob([generatedDownloadText], { type: "text/plain" })
     const url = URL.createObjectURL(blob)
     const link = document.createElement("a")
     link.href = url
@@ -705,6 +807,18 @@ function PromptGenerator({
     URL.revokeObjectURL(url)
   }
 
+  function toggleNiche(id: string, checked: boolean) {
+    setSelectedNicheIds((current) => (checked ? [...new Set([...current, id])] : current.filter((item) => item !== id)))
+  }
+
+  function selectVisibleNiches() {
+    setSelectedNicheIds((current) => [...new Set([...current, ...filteredNiches.map((niche) => niche.id)])])
+  }
+
+  function clearSelectedNiches() {
+    setSelectedNicheIds([])
+  }
+
   return (
     <div className="mx-auto max-w-[1760px] space-y-5">
       <div className="flex flex-col gap-3 border-b border-border/70 pb-4 lg:flex-row lg:items-center lg:justify-between">
@@ -713,15 +827,15 @@ function PromptGenerator({
           <p className="mt-1 text-xs font-semibold text-muted-foreground">Create polished Seedance-ready video prompts from one master idea.</p>
         </div>
         <div className="flex flex-wrap gap-2">
-          <Button variant="secondary" onClick={() => copyText(generatedText, "all")} disabled={!generated.length}>
+          <Button variant="secondary" onClick={() => copyText(generatedText, "all")} disabled={!allGeneratedPrompts.length}>
             {copied === "all" ? <Check size={16} /> : <Copy size={16} />}
             Copy All
           </Button>
-          <Button variant="secondary" onClick={downloadPrompts} disabled={!generated.length}>
+          <Button variant="secondary" onClick={downloadPrompts} disabled={!allGeneratedPrompts.length}>
             <Download size={16} />
             Download TXT
           </Button>
-          <Button onClick={() => onUsePrompts(generatedText)} disabled={!generated.length}>
+          <Button onClick={() => onUsePrompts(generatedText)} disabled={!allGeneratedPrompts.length}>
             <FileVideo size={16} />
             Use in Video Studio
           </Button>
@@ -763,14 +877,65 @@ function PromptGenerator({
                 Save API Configuration
               </Button>
             </div>
-            <Field label="Master idea">
-              <Textarea
-                className="min-h-[160px] resize-y border-border/80 bg-[#11121d] font-mono text-sm"
-                value={idea}
-                onChange={(event) => setIdea(event.target.value)}
-                placeholder="Example: luxury sports car racing through neon rain at night"
-              />
+            <Field label="Generation source">
+              <Select value={sourceMode} onChange={(event) => setSourceMode(event.target.value as "manual" | "niches")}>
+                <option value="manual">Manual master idea</option>
+                <option value="niches">Local niche TXT files</option>
+              </Select>
             </Field>
+            {sourceMode === "manual" ? (
+              <Field label="Master idea">
+                <Textarea
+                  className="min-h-[160px] resize-y border-border/80 bg-[#11121d] font-mono text-sm"
+                  value={idea}
+                  onChange={(event) => setIdea(event.target.value)}
+                  placeholder="Example: luxury sports car racing through neon rain at night"
+                />
+              </Field>
+            ) : (
+              <div className="rounded-md border border-border bg-[#0d0f1c] p-3">
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                  <SectionTitle icon={<FileText size={14} />} title="Niche mode" badge={`${selectedNicheIds.length} selected`} />
+                  <div className="flex gap-2">
+                    <Button variant="secondary" className="h-8 px-2 text-xs" onClick={selectVisibleNiches} disabled={!filteredNiches.length}>Select visible</Button>
+                    <Button variant="secondary" className="h-8 px-2 text-xs" onClick={clearSelectedNiches} disabled={!selectedNicheIds.length}>Clear</Button>
+                  </div>
+                </div>
+                <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <Field label="Count mode">
+                    <Select value={countMode} onChange={(event) => setCountMode(event.target.value as "global" | "per_niche")}>
+                      <option value="global">Global total</option>
+                      <option value="per_niche">Per niche</option>
+                    </Select>
+                  </Field>
+                  <Field label="Expected total">
+                    <Input value={String(expectedPromptTotal)} readOnly />
+                  </Field>
+                </div>
+                <div className="relative mt-3">
+                  <Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" size={15} />
+                  <Input className="pl-9" value={nicheSearch} onChange={(event) => setNicheSearch(event.target.value)} placeholder="Search local niches..." />
+                </div>
+                <div className="mt-3 max-h-[260px] space-y-2 overflow-auto rounded-md border border-border bg-background/60 p-2">
+                  {filteredNiches.map((niche) => (
+                    <label key={niche.id} className="flex cursor-pointer items-start gap-3 rounded-md px-2 py-2 text-sm hover:bg-muted/50">
+                      <input
+                        type="checkbox"
+                        checked={selectedNicheIds.includes(niche.id)}
+                        onChange={(event) => toggleNiche(niche.id, event.target.checked)}
+                        className="mt-1 h-4 w-4 accent-[hsl(var(--primary))]"
+                      />
+                      <span className="min-w-0">
+                        <span className="block truncate font-bold text-foreground">{niche.name}</span>
+                        <span className="block truncate text-xs text-muted-foreground">{niche.filename} - {formatBytes(niche.size_bytes)}</span>
+                      </span>
+                    </label>
+                  ))}
+                  {loadingNiches && <div className="py-6 text-center text-sm text-muted-foreground">Loading local niches...</div>}
+                  {!loadingNiches && !filteredNiches.length && <div className="py-6 text-center text-sm text-muted-foreground">No niche TXT files found.</div>}
+                </div>
+              </div>
+            )}
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <Field label="Prompt count">
                 <Input type="number" min={1} value={count} onChange={(event) => setCount(Math.max(1, Number(event.target.value)))} />
@@ -787,12 +952,12 @@ function PromptGenerator({
             </div>
             <Button className="h-12 w-full bg-[#ff225c] text-white hover:bg-[#ff3b6f]" onClick={generate} disabled={generating}>
               {generating ? <Loader2 className="animate-spin" size={17} /> : <Wand2 size={17} />}
-              {generating ? `Generating ${generated.length} / ${generationTarget}` : "Generate Prompts"}
+              {generating ? `Generating ${allGeneratedPrompts.length} / ${generationTarget}` : "Generate Prompts"}
             </Button>
             {generating && (
               <div className="space-y-2">
                 <div className="flex items-center justify-between text-[11px] font-black uppercase tracking-wide text-muted-foreground">
-                  <span>Live prompt batches</span>
+                  <span>{currentProgressLabel || "Live prompt batches"}</span>
                   <span>{generationProgress}%</span>
                 </div>
                 <Progress value={generationProgress} />
@@ -803,27 +968,54 @@ function PromptGenerator({
 
         <Card className="overflow-hidden">
           <div className="flex flex-col gap-3 border-b border-border bg-[#0d0f1c] p-4 sm:flex-row sm:items-center sm:justify-between">
-            <SectionTitle icon={<FileText size={15} />} title="Generated Prompts" badge={generating ? `${generated.length}/${generationTarget} ready` : `${generated.length} ready`} />
-            <div className="text-xs font-semibold text-muted-foreground">{generating ? `Showing each completed batch of ${PROMPT_UI_BATCH_SIZE} as soon as it returns.` : "One prompt per line can be sent directly to Video Studio."}</div>
+            <SectionTitle icon={<FileText size={15} />} title="Generated Prompts" badge={generating ? `${allGeneratedPrompts.length}/${generationTarget} ready` : `${allGeneratedPrompts.length} ready`} />
+            <div className="text-xs font-semibold text-muted-foreground">{generating ? `Showing completed ${sourceMode === "niches" ? "niche groups" : `batches of ${PROMPT_UI_BATCH_SIZE}`} as soon as they return.` : "One prompt per line can be sent directly to Video Studio."}</div>
           </div>
           <div className="max-h-[650px] space-y-3 overflow-auto p-4">
-            {generated.map((prompt, index) => (
-              <div key={`${prompt}-${index}`} className="rounded-md border border-border bg-background/70 p-4">
-                <div className="mb-3 flex items-center justify-between gap-3">
-                  <Badge>Prompt {index + 1}</Badge>
-                  <Button variant="secondary" className="h-8 text-xs" onClick={() => copyText(prompt, index)}>
-                    {copied === index ? <Check size={14} /> : <Copy size={14} />}
-                    {copied === index ? "Copied" : "Copy"}
-                  </Button>
+            {generatedGroups.length ? (
+              generatedGroups.map((group) => (
+                <div key={`${group.niche_id}-${group.saved_path}`} className="rounded-md border border-border bg-background/70 p-4">
+                  <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <Badge>{group.prompts.length} prompts</Badge>
+                        <h3 className="truncate font-black">{group.niche_name}</h3>
+                      </div>
+                      <p className="mt-1 truncate text-xs font-semibold text-muted-foreground">Saved locally: {group.saved_path}</p>
+                    </div>
+                    <Button variant="secondary" className="h-8 text-xs" onClick={() => copyText(group.prompts.join("\n"), `group-${group.niche_id}`)}>
+                      {copied === `group-${group.niche_id}` ? <Check size={14} /> : <Copy size={14} />}
+                      {copied === `group-${group.niche_id}` ? "Copied" : "Copy group"}
+                    </Button>
+                  </div>
+                  <div className="space-y-2">
+                    {group.prompts.map((prompt, index) => (
+                      <p key={`${group.niche_id}-${index}`} className="rounded border border-border/70 bg-[#080914] p-3 font-mono text-sm leading-6 text-foreground">
+                        <span className="mr-2 text-primary">#{index + 1}</span>{prompt}
+                      </p>
+                    ))}
+                  </div>
                 </div>
-                <p className="whitespace-pre-wrap font-mono text-sm leading-6 text-foreground">{prompt}</p>
-              </div>
-            ))}
-            {!generated.length && (
+              ))
+            ) : (
+              generated.map((prompt, index) => (
+                <div key={`${prompt}-${index}`} className="rounded-md border border-border bg-background/70 p-4">
+                  <div className="mb-3 flex items-center justify-between gap-3">
+                    <Badge>Prompt {index + 1}</Badge>
+                    <Button variant="secondary" className="h-8 text-xs" onClick={() => copyText(prompt, index)}>
+                      {copied === index ? <Check size={14} /> : <Copy size={14} />}
+                      {copied === index ? "Copied" : "Copy"}
+                    </Button>
+                  </div>
+                  <p className="whitespace-pre-wrap font-mono text-sm leading-6 text-foreground">{prompt}</p>
+                </div>
+              ))
+            )}
+            {!allGeneratedPrompts.length && (
               <div className="flex min-h-[360px] flex-col items-center justify-center text-center">
                 <div className="flex h-12 w-12 items-center justify-center rounded-full bg-primary/10 text-primary"><Wand2 size={24} /></div>
                 <h3 className="mt-4 text-lg font-black">No prompts generated yet.</h3>
-                <p className="mt-2 max-w-md text-sm leading-6 text-muted-foreground">Enter a master idea and generate prompt variations for Seedance video jobs.</p>
+                <p className="mt-2 max-w-md text-sm leading-6 text-muted-foreground">Use a master idea or select local niches, then generate prompt variations for Seedance video jobs.</p>
               </div>
             )}
           </div>
@@ -917,6 +1109,20 @@ function buildProgressivePromptRequest(masterIdea: string, previousPrompts: stri
     "Already generated prompts. Do not repeat these ideas, wording, scene setups, camera moves, or subject actions:",
     ...previousPrompts.slice(-40).map((prompt, index) => `${index + 1}. ${prompt}`),
   ].join("\n")
+}
+
+function splitPromptCount(total: number, parts: number) {
+  if (parts < 1) return []
+  const counts = Array.from({ length: parts }, () => Math.floor(total / parts))
+  const indexes = Array.from({ length: parts }, (_, index) => index)
+  for (let index = indexes.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(Math.random() * (index + 1))
+    ;[indexes[index], indexes[swapIndex]] = [indexes[swapIndex], indexes[index]]
+  }
+  for (const index of indexes.slice(0, total % parts)) {
+    counts[index] += 1
+  }
+  return counts
 }
 
 function collectVideoArtifacts(jobs: Job[]): VideoArtifact[] {

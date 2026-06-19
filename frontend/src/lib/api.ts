@@ -1,4 +1,4 @@
-import type { Job, SettingsPayload } from "./types"
+import type { Job, Niche, NichePromptGroup, SettingsPayload } from "./types"
 
 export const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:8000"
 
@@ -30,6 +30,9 @@ export const api = {
   createImageJob: (payload: unknown) => request<Job>("/api/image/jobs", { method: "POST", body: JSON.stringify(payload) }),
   createTtsJob: (payload: unknown) => request<Job>("/api/tts/jobs", { method: "POST", body: JSON.stringify(payload) }),
   logs: () => request<Array<{ id: string; level: string; message: string; created_at: string; job_id?: string }>>("/api/video/logs"),
+  niches: () => request<Niche[]>("/api/niches"),
+  generateNichePrompts: (payload: unknown) =>
+    request<{ groups: NichePromptGroup[]; model: string }>("/api/prompts/generate-niches", { method: "POST", body: JSON.stringify(payload) }),
 }
 
 export function artifactUrl(id: string) {

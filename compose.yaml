@@ -33,6 +33,8 @@ services:
       OUTPUT_DIR: /data/downloads
       PROFILE_DIR: /data/profiles
       LOG_DIR: /data/logs
+      NICHES_DIR: /data/niches
+      GENERATED_PROMPTS_DIR: /data/generated-prompts
     ports:
       - "8000:8000"
     volumes:
@@ -41,6 +43,8 @@ services:
         target: /data/downloads
       - auto_dola_profiles:/data/profiles
       - auto_dola_logs:/data/logs
+      - ./niches:/data/niches:ro
+      - ./generated-prompts:/data/generated-prompts
       - ./secrets:/run/secrets:ro
     depends_on:
       postgres:
@@ -63,12 +67,16 @@ services:
       OUTPUT_DIR: /data/downloads
       PROFILE_DIR: /data/profiles
       LOG_DIR: /data/logs
+      NICHES_DIR: /data/niches
+      GENERATED_PROMPTS_DIR: /data/generated-prompts
     volumes:
       - type: bind
         source: ${AUTO_DOLA_DOWNLOADS_DIR:-${USERPROFILE}/Downloads/AUTO-DOLA}
         target: /data/downloads
       - auto_dola_profiles:/data/profiles
       - auto_dola_logs:/data/logs
+      - ./niches:/data/niches:ro
+      - ./generated-prompts:/data/generated-prompts
       - ./secrets:/run/secrets:ro
     depends_on:
       postgres:

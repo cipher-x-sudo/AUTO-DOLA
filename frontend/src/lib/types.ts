@@ -50,3 +50,19 @@ export interface SettingsPayload {
   proxy_url: string
   tts_default_voice: string
 }
+
+export interface Niche {
+  id: string
+  name: string
+  filename: string
+  size_bytes: number
+}
+
+export interface NichePromptGroup {
+  niche_id: string
+  niche_name: string
+  filename: string
+  requested_count: number
+  prompts: string[]
+  saved_path: string
+}

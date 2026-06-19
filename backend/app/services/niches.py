@@ -53,6 +53,8 @@ def split_global_count(total: int, niche_count: int) -> list[int]:
         raise ValueError("Prompt count must be at least 1.")
     if niche_count < 1:
         raise ValueError("Select at least one niche.")
+    if total < niche_count:
+        raise ValueError("Global prompt count must be at least the selected niche count.")
     counts = [total // niche_count for _ in range(niche_count)]
     remainder = total % niche_count
     indexes = list(range(niche_count))
