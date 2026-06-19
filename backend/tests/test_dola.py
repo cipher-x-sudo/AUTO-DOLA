@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 from httpx import Response
@@ -8,15 +9,19 @@ from app.services.dola import (
     ANDROID_WEBVIEW_UA,
     DolaClient,
     DolaSubmissionError,
+    PAYLOAD_TEMPLATE_VERSION,
     base_payload,
     build_dola_payload,
     format_cookie_header,
     merge_cookies,
     parse_cookie_text,
+    parse_cookie_text_with_stats,
+    parse_assistant_messages_from_stream,
     parse_conversation_from_stream,
     parse_play_info,
     parse_submit_response,
     parse_vid,
+    extract_chain_texts,
     read_auth_cookies,
 )
 
@@ -28,6 +33,31 @@ def test_build_payload_includes_seedance_duration_and_prompt() -> None:
     assert json.loads(payload["chat_ability"]["ability_param"]) == {"model": "seedance_v2.0", "duration": 15}
 
 
+def test_base_payload_matches_browser_shape() -> None:
+    payload = base_payload("verify_test")
+    text_block = payload["messages"][0]["content_block"][0]["content"]["text_block"]
+
+    assert payload["user_context"] == []
+    assert text_block == {"text": "placeholder", "icon_url": "", "icon_url_dark": "", "summary": ""}
+    assert payload["ext"] == {
+        "use_deep_think": "0",
+        "fp": "verify_test",
+        "sub_conv_firstmet_type": "1",
+        "collection_id": "",
+        "conversation_init_option": '{"need_ack_conversation":true}',
+        "commerce_credit_config_enable": "0",
+    }
+    assert {
+        "collect_id",
+        "is_audio",
+        "answer_with_suggest",
+        "tts_switch",
+        "need_deep_think",
+        "disable_sse_cache",
+        "message_storage_type",
+    }.issubset(payload["option"])
+
+
 def test_cookie_loader_parses_name_value_lines(tmp_path: Path) -> None:
     path = tmp_path / "auth_cookies.txt"
     path.write_text("sid=abc\n sessionid = xyz \n# ignored\n", encoding="utf-8")
@@ -37,6 +67,17 @@ def test_cookie_loader_parses_name_value_lines(tmp_path: Path) -> None:
 
 def test_cookie_loader_parses_raw_cookie_header() -> None:
     assert parse_cookie_text("sid=abc; sessionid=xyz; ttwid=old") == {"sid": "abc", "sessionid": "xyz", "ttwid": "old"}
+
+
+def test_cookie_loader_counts_malformed_lines() -> None:
+    cookies, malformed = parse_cookie_text_with_stats("sid=abc\nbroken-line\nempty=\nCookie: sessionid=xyz; bad")
+
+    assert cookies == {"sid": "abc", "sessionid": "xyz"}
+    assert malformed == 3
+
+
+def test_cookie_loader_missing_file_falls_back_to_settings() -> None:
+    assert read_auth_cookies("sid=abc", paths=(Path("missing-auth-cookies.txt"),)) == {"sid": "abc"}
 
 
 def test_cookie_merge_replaces_stale_ttwid_and_preserves_auth() -> None:
@@ -59,9 +100,14 @@ async def test_build_session_includes_fresh_cookies_and_webview_headers(monkeypa
     assert "hook_slardar_session_id=hook" in session.headers["cookie"]
     assert "sid=abc" in session.headers["cookie"]
     assert "s_v_web_id=verify_" in session.headers["cookie"]
+    assert f"s_v_web_id={session.fp}" in session.headers["cookie"]
+    assert session.payload_template["ext"]["fp"] == session.fp
+    assert parse_qs(urlparse(session.url).query)["fp"] == [session.fp]
+    assert parse_qs(urlparse(session.url).query)["web_platform"] == ["web"]
     assert session.headers["user-agent"] == ANDROID_WEBVIEW_UA
     assert session.headers["sec-ch-ua-mobile"] == "?1"
     assert session.has_ttwid is True
+    assert session.has_hook_slardar is True
     assert session.has_auth_cookies is True
 
 
@@ -91,11 +137,47 @@ async def test_common_invalid_param_has_redacted_diagnostic(monkeypatch: pytest.
 
     diagnostic = exc_info.value.diagnostic
     assert diagnostic["has_ttwid"] is True
+    assert diagnostic["has_hook_slardar"] is False
     assert diagnostic["has_auth_cookies"] is True
+    assert diagnostic["cookie_count"] == 5
+    assert diagnostic["cookie_names"] == ["i18next", "flow_user_country", "s_v_web_id", "sid", "ttwid"]
+    assert diagnostic["payload_template_version"] == PAYLOAD_TEMPLATE_VERSION
+    assert diagnostic["option_key_count"] >= 30
+    assert diagnostic["has_ext_fp"] is True
+    assert diagnostic["fp_matches_url"] is True
+    assert diagnostic["url_has_web_platform"] is True
     assert diagnostic["model"] == "seedance_v2.0"
     assert diagnostic["duration"] == 15
     assert diagnostic["ratio"] == "9:16"
     assert "sid=abc" not in diagnostic["body_snippet"]
+
+
+@pytest.mark.asyncio
+async def test_common_invalid_param_reports_payload_session_not_auth(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_public_cookies(self: DolaClient) -> dict[str, str]:
+        return {"ttwid": "fresh"}
+
+    monkeypatch.setattr(DolaClient, "_fetch_public_cookies", fake_public_cookies)
+    session = await DolaClient().build_session()
+    payload = build_dola_payload(session.payload_template, "a swimmer", 15, "9:16")
+
+    with pytest.raises(DolaSubmissionError, match="payload/session"):
+        parse_submit_response(session, payload, Response(200, text='event: STREAM_ERROR\ndata: {"error_code":710020202,"error_msg":"common invalid param"}'))
+
+
+@pytest.mark.asyncio
+async def test_high_demand_is_retryable_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_public_cookies(self: DolaClient) -> dict[str, str]:
+        return {"ttwid": "fresh"}
+
+    monkeypatch.setattr(DolaClient, "_fetch_public_cookies", fake_public_cookies)
+    session = await DolaClient().build_session()
+    payload = build_dola_payload(session.payload_template, "a swimmer", 15, "9:16")
+
+    with pytest.raises(DolaSubmissionError, match="high demand") as exc_info:
+        parse_submit_response(session, payload, Response(200, text='event: STREAM_ERROR\ndata: {"error_code":710022002,"error_msg":"We are experiencing high demand right now. Please try again later."}'))
+
+    assert exc_info.value.diagnostic["error_code"] == 710022002
 
 
 def test_parse_conversation_from_stream() -> None:

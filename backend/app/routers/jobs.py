@@ -1,18 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+from hmac import compare_digest
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import selectinload
 from sqlmodel import Session, select
 
 from app.database import get_session
+from app.config import settings
 from app.events import hub, job_channel
 from app.models import Job, JobItem, JobKind, JobStatus, LogEvent, utcnow
 from app.queue import enqueue_job
 from app.schemas import JobRead, VideoJobCreate
+from app.services.cookie_snapshots import list_cookie_snapshot_metadata, read_cookie_snapshot, redact_cookie_snapshot_payload
 from app.services.jobs import log
 
 router = APIRouter(prefix="/api/video", tags=["video"])
@@ -35,6 +38,29 @@ def create_video_job(payload: VideoJobCreate, session: Session = Depends(get_ses
 @router.get("/jobs", response_model=list[JobRead])
 def list_jobs(session: Session = Depends(get_session)) -> list[Job]:
     return session.exec(select(Job).where(Job.kind == JobKind.video).options(selectinload(Job.items), selectinload(Job.artifacts)).order_by(Job.created_at.desc()).limit(100)).all()
+
+
+@router.get("/jobs/{job_id}/dola-cookie-snapshots")
+def list_dola_cookie_snapshots(job_id: UUID, session: Session = Depends(get_session)) -> list[dict]:
+    try:
+        return list_cookie_snapshot_metadata(session, job_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Job not found") from None
+
+
+@router.get("/jobs/{job_id}/dola-cookie-snapshots/{snapshot_id}")
+def get_dola_cookie_snapshot(job_id: UUID, snapshot_id: str, x_admin_token: str = Header(default="", alias="X-Admin-Token"), session: Session = Depends(get_session)) -> dict:
+    if not compare_digest(x_admin_token, settings.admin_token):
+        raise HTTPException(status_code=403, detail="Invalid admin token")
+    try:
+        snapshots = list_cookie_snapshot_metadata(session, job_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Job not found") from None
+    metadata = next((snapshot for snapshot in snapshots if snapshot.get("snapshot_id") == snapshot_id), None)
+    if not metadata:
+        raise HTTPException(status_code=404, detail="Snapshot not found")
+    payload = read_cookie_snapshot(metadata)
+    return {"metadata": metadata, "snapshot": payload, "redacted": redact_cookie_snapshot_payload(payload)}
 
 
 @router.get("/jobs/{job_id}", response_model=JobRead)

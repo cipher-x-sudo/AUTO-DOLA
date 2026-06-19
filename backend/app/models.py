@@ -46,6 +46,7 @@ class Job(SQLModel, table=True):
     done: int = 0
     failed: int = 0
     config_json: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON().with_variant(JSONB, "postgresql")))
+    dola_cookie_snapshots_json: list[dict[str, Any]] = Field(default_factory=list, sa_column=Column(JSON().with_variant(JSONB, "postgresql"), nullable=False, default=list))
     error: str | None = None
     items: list["JobItem"] = Relationship(back_populates="job")
     artifacts: list["Artifact"] = Relationship(back_populates="job")

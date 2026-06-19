@@ -62,6 +62,7 @@ class JobRead(BaseModel):
     done: int
     failed: int
     config_json: dict[str, Any]
+    dola_cookie_snapshots_json: list[dict[str, Any]] = []
     error: str | None
     items: list[JobItemRead] = []
     artifacts: list[ArtifactRead] = []
