@@ -1,7 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react"
 import {
-  AlertCircle,
-  CheckCircle2,
   Download,
   FileText,
   FileVideo,
@@ -37,7 +35,7 @@ const emptySettings: SettingsPayload = {
   tts_default_voice: "en-US-AriaNeural",
 }
 
-type Page = "video" | "history" | "logs" | "settings"
+type Page = "video" | "history"
 
 interface LogRow {
   id: string
@@ -99,8 +97,6 @@ export default function App() {
     <Layout page={page} setPage={(next) => setPage(next as Page)} loading={loading}>
       {page === "video" && <VideoConsole settings={settings} jobs={jobs} activeJob={activeJob} videos={videos} logs={recentLogs} onRefresh={refresh} />}
       {page === "history" && <History jobs={jobs} />}
-      {page === "logs" && <Logs rows={logs} />}
-      {page === "settings" && <SettingsPage settings={settings} setSettings={setSettings} />}
     </Layout>
   )
 }
@@ -120,11 +116,11 @@ function VideoConsole({
   logs: LogRow[]
   onRefresh: () => void
 }) {
-  const [promptText, setPromptText] = useState("car")
+  const [promptText, setPromptText] = useState("")
   const [ratio, setRatio] = useState(settings.default_ratio || "9:16")
   const [duration, setDuration] = useState(settings.default_duration || 15)
   const [parallel, setParallel] = useState(settings.default_parallel || 30)
-  const [saveFolder, setSaveFolder] = useState(settings.output_dir || "C:\\Users\\Muhammad Huzaifa\\Videos")
+  const [saveFolder, setSaveFolder] = useState(settings.output_dir || "")
   const [cleanWatermark, setCleanWatermark] = useState(true)
   const [submitting, setSubmitting] = useState(false)
   const [logSearch, setLogSearch] = useState("")
@@ -133,27 +129,25 @@ function VideoConsole({
     setRatio((current) => current || settings.default_ratio || "9:16")
     setDuration((current) => current || settings.default_duration || 15)
     setParallel((current) => current || settings.default_parallel || 30)
-    setSaveFolder((current) => current || settings.output_dir || "C:\\Users\\Muhammad Huzaifa\\Videos")
+    setSaveFolder((current) => current || settings.output_dir || "")
   }, [settings])
 
   const stats = useMemo(() => {
     const items = jobs.flatMap((job) => job.items)
     return {
-      total: items.length || promptLines(promptText).length,
+      total: items.length,
       queued: items.filter((item) => item.status === "queued").length,
       generating: items.filter((item) => item.status === "running").length,
       done: items.filter((item) => item.status === "completed").length,
       failed: items.filter((item) => item.status === "failed").length,
-      skipped: items.filter((item) => item.status === "cancelled").length,
       videos: videos.length,
     }
-  }, [jobs, promptText, videos])
+  }, [jobs, videos])
 
   const progressTotal = activeJob?.total || stats.total || 0
   const progressDone = activeJob ? activeJob.done + activeJob.failed : stats.done + stats.failed
   const progress = progressTotal ? Math.round((progressDone / progressTotal) * 100) : 0
   const queueItems = activeJob?.items ?? jobs.flatMap((job) => job.items).slice(0, 8)
-  const failedItems = jobs.flatMap((job) => job.items.map((item) => ({ job, item }))).filter(({ item }) => item.status === "failed").slice(0, 6)
   const filteredLogs = logs.filter((row) => row.message.toLowerCase().includes(logSearch.toLowerCase()) || row.level.toLowerCase().includes(logSearch.toLowerCase()))
 
   async function submit() {
@@ -207,7 +201,7 @@ function VideoConsole({
         <StatBox label="Generating" value={stats.generating} tone="blue" />
         <StatBox label="Done" value={stats.done} tone="green" />
         <StatBox label="Failed" value={stats.failed} tone="red" />
-        <StatBox label="Videos" value={stats.videos || stats.skipped} tone="amber" />
+        <StatBox label="Videos" value={stats.videos} tone="amber" />
       </section>
 
       <Card className="px-4 py-3">
@@ -243,7 +237,7 @@ function VideoConsole({
         </div>
       </section>
 
-      <VideoGallery videos={videos} failedItems={failedItems} />
+      <VideoGallery videos={videos} />
     </div>
   )
 }
@@ -258,7 +252,12 @@ function OutputLocation({ path, setPath }: { path: string; setPath: (path: strin
           </div>
           <div className="min-w-0">
             <div className="text-xs font-black uppercase tracking-[0.16em] text-muted-foreground">Video output location</div>
-            <Input className="mt-2 h-9 max-w-3xl border-transparent bg-transparent px-0 font-mono text-xs focus:ring-0" value={path} onChange={(event) => setPath(event.target.value)} />
+            <Input
+              className="mt-2 h-9 max-w-3xl border-transparent bg-transparent px-0 font-mono text-xs focus:ring-0"
+              value={path}
+              onChange={(event) => setPath(event.target.value)}
+              placeholder="Set an output folder before starting a job"
+            />
           </div>
         </div>
         <div className="flex shrink-0 flex-wrap gap-2">
@@ -417,7 +416,7 @@ function LiveLogConsole({ logs, search, setSearch }: { logs: LogRow[]; search: s
   )
 }
 
-function VideoGallery({ videos, failedItems }: { videos: VideoArtifact[]; failedItems: Array<{ job: Job; item: JobItem }> }) {
+function VideoGallery({ videos }: { videos: VideoArtifact[] }) {
   return (
     <section className="space-y-4">
       <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
@@ -451,21 +450,9 @@ function VideoGallery({ videos, failedItems }: { videos: VideoArtifact[]; failed
       ) : (
         <Card className="flex min-h-[190px] flex-col items-center justify-center p-8 text-center">
           <div className="flex h-12 w-12 items-center justify-center rounded-full bg-primary/10 text-primary"><FileVideo size={24} /></div>
-          <h3 className="mt-4 text-lg font-black">No videos generated yet.</h3>
+          <h3 className="mt-4 text-lg font-black">No generated videos yet.</h3>
           <p className="mt-2 max-w-md text-sm leading-6 text-muted-foreground">Completed MP4 artifacts will appear here with playable previews and download actions.</p>
         </Card>
-      )}
-
-      {!!failedItems.length && (
-        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-          {failedItems.map(({ item }) => (
-            <Card key={item.id} className="border-red-500/25 p-4">
-              <div className="flex items-center gap-2 text-red-300"><AlertCircle size={17} /><span className="font-black">Failed item</span></div>
-              <div className="mt-2 font-bold">{item.title || item.prompt}</div>
-              <p className="mt-1 break-words text-sm text-muted-foreground">{item.error || "No error message was returned."}</p>
-            </Card>
-          ))}
-        </div>
       )}
     </section>
   )
@@ -480,59 +467,6 @@ function History({ jobs }: { jobs: Job[] }) {
       </div>
       <JobTable jobs={jobs} />
     </div>
-  )
-}
-
-function Logs({ rows }: { rows: LogRow[] }) {
-  return (
-    <Card className="mx-auto max-w-[1760px] p-4 sm:p-5">
-      <h2 className="text-2xl font-black">System logs</h2>
-      <div className="mt-4 max-h-[720px] space-y-2 overflow-auto">
-        {rows.map((row) => (
-          <div key={row.id} className="rounded-md bg-background/70 p-3 text-sm">
-            <Badge tone={row.level === "error" ? "error" : row.level === "warn" ? "warn" : row.level === "success" ? "success" : "muted"}>{row.level}</Badge>
-            <span className="ml-3 text-muted-foreground">{new Date(row.created_at).toLocaleString()}</span>
-            <div className="mt-2 break-words font-medium">{row.message}</div>
-          </div>
-        ))}
-        {!rows.length && <EmptySmall text="No logs yet." />}
-      </div>
-    </Card>
-  )
-}
-
-function SettingsPage({ settings, setSettings }: { settings: SettingsPayload; setSettings: (value: SettingsPayload) => void }) {
-  async function save() {
-    const next = await api.saveSettings(settings)
-    setSettings(next)
-    toast.success("Settings saved")
-  }
-  return (
-    <Card className="mx-auto max-w-5xl p-4 sm:p-5">
-      <h2 className="text-2xl font-black">Video settings</h2>
-      <p className="mt-1 text-sm text-muted-foreground">Configure Dola session cookies, output paths, proxies, and video defaults.</p>
-      <div className="mt-5 grid grid-cols-1 gap-4 md:grid-cols-2">
-        <Field label="Dola auth cookies" className="md:col-span-2">
-          <Textarea className="min-h-[150px]" placeholder="Paste current Dola cookies/session values" value={settings.dola_auth_cookies} onChange={(event) => setSettings({ ...settings, dola_auth_cookies: event.target.value })} />
-        </Field>
-        <Field label="Output directory">
-          <Input value={settings.output_dir} onChange={(event) => setSettings({ ...settings, output_dir: event.target.value })} />
-        </Field>
-        <Field label="Proxy URL">
-          <Input value={settings.proxy_url} onChange={(event) => setSettings({ ...settings, proxy_url: event.target.value })} />
-        </Field>
-        <Field label="Default ratio">
-          <Select value={settings.default_ratio} onChange={(event) => setSettings({ ...settings, default_ratio: event.target.value })}><option>9:16</option><option>16:9</option><option>1:1</option></Select>
-        </Field>
-        <Field label="Default duration">
-          <Input type="number" value={settings.default_duration} onChange={(event) => setSettings({ ...settings, default_duration: Number(event.target.value) })} />
-        </Field>
-        <Field label="Default parallel">
-          <Input type="number" value={settings.default_parallel} onChange={(event) => setSettings({ ...settings, default_parallel: Number(event.target.value) })} />
-        </Field>
-      </div>
-      <Button className="mt-5" onClick={save}><CheckCircle2 size={16} />Save settings</Button>
-    </Card>
   )
 }
 
@@ -571,10 +505,6 @@ function MiniAction({ children, danger, onClick }: { children: ReactNode; danger
 
 function IconButton({ label, children, onClick }: { label: string; children: ReactNode; onClick?: () => void }) {
   return <button aria-label={label} title={label} onClick={onClick} className="inline-flex h-9 w-9 items-center justify-center rounded-md bg-muted/60 text-muted-foreground transition hover:bg-muted hover:text-foreground">{children}</button>
-}
-
-function EmptySmall({ text }: { text: string }) {
-  return <div className="rounded-md border border-dashed border-border p-4 text-center text-sm text-muted-foreground">{text}</div>
 }
 
 function promptLines(text: string) {

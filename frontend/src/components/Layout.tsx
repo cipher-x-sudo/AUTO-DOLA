@@ -1,11 +1,9 @@
-import { FileVideo, History, Loader2, Moon, ScrollText, Settings, Sparkles } from "lucide-react"
+import { FileVideo, History, Loader2, Moon, Sparkles } from "lucide-react"
 import { Button } from "./ui"
 
 const nav = [
   ["video", FileVideo, "Video Studio"],
   ["history", History, "History"],
-  ["logs", ScrollText, "Logs"],
-  ["settings", Settings, "Settings"],
 ] as const
 
 export function Layout({ page, setPage, loading, children }: { page: string; setPage: (page: string) => void; loading?: boolean; children: React.ReactNode }) {
