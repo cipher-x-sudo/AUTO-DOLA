@@ -68,7 +68,8 @@ async def process_video(session: Session, job: Job) -> None:
     config = job.config_json
     output_dir = Path(config.get("save_folder") or app_settings.get("output_dir") or settings.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    client = DolaClient(app_settings.get("dola_auth_cookies", settings.dola_auth_cookies), settings.dola_default_region)
+    proxy_url = app_settings.get("proxy_url", "") if app_settings.get("proxy_enabled") else ""
+    client = DolaClient(app_settings.get("dola_auth_cookies", settings.dola_auth_cookies), settings.dola_default_region, proxy=proxy_url)
     items = session.exec(select(JobItem).where(JobItem.job_id == job.id)).all()
     item_numbers = {item.id: index + 1 for index, item in enumerate(items)}
     parallel = max(1, int(config.get("parallel", 5)))
@@ -190,10 +191,8 @@ async def process_video(session: Session, job: Job) -> None:
                                 if save_mode != "both":
                                     raw_path.unlink(missing_ok=True)
                             else:
-                                shutil.copyfile(raw_path, final_path)
                                 artifact_path = raw_path
-                                final_path.unlink(missing_ok=True)
-                                item_log("Watermark cleanup failed; kept raw video instead.", "warn")
+                                item_log("Watermark cleanup failed; using raw video as artifact.", "warn")
                         else:
                             shutil.copyfile(raw_path, final_path)
                             artifact_path = final_path

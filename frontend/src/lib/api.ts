@@ -27,6 +27,14 @@ export const api = {
   cancelVideoJob: (id: string) => request<Job>(`/api/video/jobs/${id}/cancel`, { method: "POST" }),
   clearVideoHistory: () => request<{ deleted: number }>("/api/video/jobs", { method: "DELETE" }),
   generatePrompts: (payload: unknown) => request<{ prompts: string[]; model: string }>("/api/prompts/generate", { method: "POST", body: JSON.stringify(payload) }),
+  importPrompts: (file: File) => {
+    const form = new FormData()
+    form.append("file", file)
+    return fetch(`${API_BASE}/api/prompts/import`, { method: "POST", body: form }).then(async (res) => {
+      if (!res.ok) throw new Error(await res.text())
+      return res.json() as Promise<{ prompts: string[]; count: number }>
+    })
+  },
   createImageJob: (payload: unknown) => request<Job>("/api/image/jobs", { method: "POST", body: JSON.stringify(payload) }),
   createTtsJob: (payload: unknown) => request<Job>("/api/tts/jobs", { method: "POST", body: JSON.stringify(payload) }),
   logs: () => request<Array<{ id: string; level: string; message: string; created_at: string; job_id?: string }>>("/api/video/logs"),

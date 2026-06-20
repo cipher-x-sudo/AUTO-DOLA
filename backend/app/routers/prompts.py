@@ -1,4 +1,7 @@
-from fastapi import APIRouter, Depends, HTTPException
+import csv
+import io
+
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlmodel import Session
 
 from app.database import get_session
@@ -56,6 +59,30 @@ async def generate_niche_prompts(payload: NichePromptGenerateRequest, session: S
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return NichePromptGenerateResponse(groups=groups, model=model)
+
+
+@router.post("/import")
+async def import_prompts(file: UploadFile = File(...)) -> dict:
+    content = await file.read()
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError:
+        raise HTTPException(status_code=400, detail="File must be UTF-8 encoded.")
+    filename = (file.filename or "").lower()
+    prompts: list[str] = []
+    if filename.endswith(".csv"):
+        reader = csv.reader(io.StringIO(text))
+        for row in reader:
+            if row and row[0].strip():
+                prompts.append(row[0].strip())
+    else:
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped:
+                prompts.append(stripped)
+    if not prompts:
+        raise HTTPException(status_code=400, detail="No prompts found in file.")
+    return {"prompts": prompts, "count": len(prompts)}
 
 
 @router.post("/save-niche-prompts", response_model=NichePromptSaveResponse)

@@ -24,8 +24,9 @@ def log(session: Session, message: str, level: str = "info", job_id: UUID | None
     }
     try:
         asyncio.get_running_loop().create_task(publish_log(payload))
-    except RuntimeError:
-        pass
+    except RuntimeError as exc:
+        import logging
+        logging.getLogger(__name__).warning("Could not publish log to event stream (no running loop): %s", exc)
     return row
 
 

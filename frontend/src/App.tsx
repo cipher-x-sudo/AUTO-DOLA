@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import {
   Check,
   Copy,
@@ -423,13 +423,28 @@ function GenerationSettings({
 }
 
 function PromptsPanel({ promptText, setPromptText, count }: { promptText: string; setPromptText: (value: string) => void; count: number }) {
+  const txtRef = useRef<HTMLInputElement>(null)
+  const csvRef = useRef<HTMLInputElement>(null)
+
+  async function handleImport(file: File) {
+    try {
+      const result = await api.importPrompts(file)
+      const incoming = result.prompts.join("\n")
+      setPromptText(promptText.trim() ? `${promptText.trim()}\n${incoming}` : incoming)
+    } catch (err) {
+      alert(`Import failed: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+
   return (
     <Card className="p-4">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <SectionTitle icon={<FileText size={15} />} title="Prompts" badge={`${count} prompt${count === 1 ? "" : "s"}`} />
         <div className="flex flex-wrap gap-2">
-          <MiniAction><Upload size={13} />TXT</MiniAction>
-          <MiniAction><Upload size={13} />CSV</MiniAction>
+          <input ref={txtRef} type="file" accept=".txt" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) { handleImport(f); e.target.value = "" } }} />
+          <input ref={csvRef} type="file" accept=".csv" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) { handleImport(f); e.target.value = "" } }} />
+          <MiniAction onClick={() => txtRef.current?.click()}><Upload size={13} />TXT</MiniAction>
+          <MiniAction onClick={() => csvRef.current?.click()}><Upload size={13} />CSV</MiniAction>
           <MiniAction danger onClick={() => setPromptText("")}><Trash2 size={13} />Clear</MiniAction>
         </div>
       </div>
@@ -439,7 +454,7 @@ function PromptsPanel({ promptText, setPromptText, count }: { promptText: string
         onChange={(event) => setPromptText(event.target.value)}
         placeholder="One prompt per line..."
       />
-      <p className="mt-3 text-xs font-semibold text-muted-foreground">One prompt per line = one video. Import controls are visual placeholders for the next pass.</p>
+      <p className="mt-3 text-xs font-semibold text-muted-foreground">One prompt per line = one video.</p>
     </Card>
   )
 }

@@ -86,10 +86,11 @@ class DolaTerminalGenerationError(RuntimeError):
 
 
 class DolaClient:
-    def __init__(self, auth_cookies: str = "", region: str = "BD", timeout: float = 30) -> None:
+    def __init__(self, auth_cookies: str = "", region: str = "BD", timeout: float = 30, proxy: str = "") -> None:
         self.auth_cookies = auth_cookies.strip()
         self.region = region
         self.timeout = timeout
+        self.proxy = proxy.strip() or None
 
     async def build_session(self) -> DolaSession:
         device_id = str(uuid.uuid4().int)[:19]
@@ -145,14 +146,15 @@ class DolaClient:
                 "sec-ch-ua-mobile": "?1",
                 "sec-ch-ua-platform": '"Android"',
             }
-            async with httpx.AsyncClient(timeout=15, verify=False, follow_redirects=True, headers=headers) as client:
+            async with httpx.AsyncClient(timeout=15, verify=False, follow_redirects=True, headers=headers, proxy=self.proxy) as client:
                 response = await client.get("https://www.dola.com/")
                 cookies = parse_set_cookie_headers(response.headers.get_list("set-cookie"))
                 cookies.update({key: value for key, value in response.cookies.items()})
                 cookies.update({key: value for key, value in client.cookies.items()})
                 return cookies
-        except Exception:
-            pass
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).warning("Failed to fetch public Dola cookies: %s", exc)
         return {}
 
     async def submit(
@@ -163,7 +165,7 @@ class DolaClient:
         raw_response_fn: Callable[[str, int, int, str], None] | None = None,
         attempt: int = 1,
     ) -> DolaSubmitResult:
-        async with httpx.AsyncClient(timeout=self.timeout, verify=False) as client:
+        async with httpx.AsyncClient(timeout=self.timeout, verify=False, proxy=self.proxy) as client:
             response = await client.post(session.url, headers=session.headers, json=payload)
         if raw_response_fn:
             raw_response_fn("submit", attempt, response.status_code, response.text)
@@ -187,7 +189,7 @@ class DolaClient:
         headers["agw-js-conv"] = "str"
         body = build_chain_poll_body(conversation_id, conversation_type)
         seen_messages: set[str] = set()
-        async with httpx.AsyncClient(timeout=self.timeout, verify=False) as client:
+        async with httpx.AsyncClient(timeout=self.timeout, verify=False, proxy=self.proxy) as client:
             for attempt in range(1, max_attempts + 1):
                 if cancel_fn and cancel_fn():
                     if log_fn:
@@ -592,8 +594,9 @@ def parse_sse_data_chunks(text: str) -> list[Any]:
     if not chunks:
         try:
             chunks.append(json.loads(text))
-        except json.JSONDecodeError:
-            pass
+        except json.JSONDecodeError as exc:
+            import logging
+            logging.getLogger(__name__).warning("Could not parse Dola response as JSON: %s", exc)
     return chunks
 
 

@@ -108,7 +108,14 @@ async def generate_for_niches(
     for niche, prompt_count in zip(niches, counts, strict=True):
         if prompt_count <= 0:
             continue
-        master_prompt = niche.path.read_text(encoding="utf-8")
+        if niche.size_bytes > 1_000_000:
+            raise ValueError(f"Niche file '{niche.filename}' is too large ({niche.size_bytes} bytes); limit is 1 MB.")
+        try:
+            master_prompt = niche.path.read_text(encoding="utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError(f"Niche file '{niche.filename}' is not valid UTF-8: {exc}") from exc
+        if not master_prompt.strip():
+            raise ValueError(f"Niche file '{niche.filename}' is empty.")
         if existing_prompts:
             avoid = "\n".join(f"{index + 1}. {prompt}" for index, prompt in enumerate(existing_prompts[-80:]))
             master_prompt = f"{master_prompt}\n\nAlready generated prompts. Do not repeat concepts, wording, camera moves, subjects, or settings:\n{avoid}"
