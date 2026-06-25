@@ -11,6 +11,8 @@ from app.services.dola import (
     DolaSession,
     DolaSubmissionError,
     PAYLOAD_TEMPLATE_VERSION,
+    PLAY_INFO_POLL_ATTEMPTS,
+    VIDEO_POLL_ATTEMPTS,
     base_payload,
     build_dola_payload,
     build_chain_poll_body,
@@ -31,11 +33,25 @@ from app.services.dola import (
 from app.services.raw_responses import split_response_body
 
 
+class FakeCurlSession:
+    def __init__(self, responses: list[Response]) -> None:
+        self.responses = responses
+        self.cookies: dict[str, str] = {}
+        self.posts: list[dict[str, object]] = []
+
+    async def get(self, *_args: object, **_kwargs: object) -> Response:
+        return self.responses.pop(0)
+
+    async def post(self, url: str, **kwargs: object) -> Response:
+        self.posts.append({"url": url, **kwargs})
+        return self.responses.pop(0)
+
+
 def test_build_payload_includes_seedance_duration_and_prompt() -> None:
     payload = build_dola_payload(base_payload(), "cinematic city flythrough", 15, "9:16")
-    assert payload["messages"][0]["content_block"][0]["content"]["text_block"]["text"] == "Generate video: cinematic city flythrough, 9:16"
+    assert payload["messages"][0]["content_block"][0]["content"]["text_block"]["text"] == "Generate exactly 15 seconds vertical 9:16 video. cinematic city flythrough"
     assert payload["chat_ability"]["ability_type"] == 17
-    assert json.loads(payload["chat_ability"]["ability_param"]) == {"model": "seedance_v2.0", "duration": 15}
+    assert json.loads(payload["chat_ability"]["ability_param"]) == {"model": "seedance_v2.0", "duration": 15, "ratio": "9:16"}
 
 
 def test_base_payload_matches_browser_shape() -> None:
@@ -123,7 +139,7 @@ async def test_build_session_includes_fresh_cookies_and_webview_headers(monkeypa
 
     assert "ttwid=fresh" in session.headers["cookie"]
     assert "hook_slardar_session_id=hook" in session.headers["cookie"]
-    assert "sid=abc" in session.headers["cookie"]
+    assert "sid=abc" not in session.headers["cookie"]
     assert "s_v_web_id=verify_" in session.headers["cookie"]
     assert f"s_v_web_id={session.fp}" in session.headers["cookie"]
     assert session.payload_template["ext"]["fp"] == session.fp
@@ -133,7 +149,17 @@ async def test_build_session_includes_fresh_cookies_and_webview_headers(monkeypa
     assert session.headers["sec-ch-ua-mobile"] == "?1"
     assert session.has_ttwid is True
     assert session.has_hook_slardar is True
-    assert session.has_auth_cookies is True
+    assert session.has_auth_cookies is False
+    query = parse_qs(urlparse(session.url).query)
+    assert query["aid"] == ["495671"]
+    assert query["real_aid"] == ["495671"]
+    assert query["device_platform"] == ["android"]
+    assert query["region"] == ["BD"]
+    assert query["sys_region"] == ["BD"]
+    assert query["samantha_web"] == ["1"]
+    assert query["version_code"] == ["20800"]
+    assert query["pc_version"] == ["3.23.5"]
+    assert query["use-olympus-account"] == ["1"]
 
 
 @pytest.mark.asyncio
@@ -143,7 +169,7 @@ async def test_build_session_requires_ttwid(monkeypatch: pytest.MonkeyPatch) -> 
 
     monkeypatch.setattr(DolaClient, "_fetch_public_cookies", fake_public_cookies)
 
-    with pytest.raises(RuntimeError, match="no ttwid cookie"):
+    with pytest.raises(RuntimeError, match="Public Dola session failed"):
         await DolaClient().build_session()
 
 
@@ -163,17 +189,19 @@ async def test_common_invalid_param_has_redacted_diagnostic(monkeypatch: pytest.
     diagnostic = exc_info.value.diagnostic
     assert diagnostic["has_ttwid"] is True
     assert diagnostic["has_hook_slardar"] is False
-    assert diagnostic["has_auth_cookies"] is True
-    assert diagnostic["cookie_count"] == 5
-    assert diagnostic["cookie_names"] == ["i18next", "flow_user_country", "s_v_web_id", "sid", "ttwid"]
+    assert diagnostic["has_auth_cookies"] is False
+    assert diagnostic["cookie_count"] == 4
+    assert diagnostic["cookie_names"] == ["i18next", "flow_user_country", "s_v_web_id", "ttwid"]
     assert diagnostic["payload_template_version"] == PAYLOAD_TEMPLATE_VERSION
     assert diagnostic["option_key_count"] >= 30
     assert diagnostic["has_ext_fp"] is True
     assert diagnostic["fp_matches_url"] is True
+    assert diagnostic["fp_matches_cookie"] is True
+    assert "aid" in diagnostic["url_query_keys"]
     assert diagnostic["url_has_web_platform"] is True
     assert diagnostic["model"] == "seedance_v2.0"
     assert diagnostic["duration"] == 15
-    assert diagnostic["ratio"] == "9:16"
+    assert diagnostic["prompt_text"] == "Generate exactly 15 seconds vertical 9:16 video. a swimmer"
     assert "sid=abc" not in diagnostic["body_snippet"]
 
 
@@ -203,6 +231,129 @@ async def test_high_demand_is_retryable_message(monkeypatch: pytest.MonkeyPatch)
         parse_submit_response(session, payload, Response(200, text='event: STREAM_ERROR\ndata: {"error_code":710022002,"error_msg":"We are experiencing high demand right now. Please try again later."}'))
 
     assert exc_info.value.diagnostic["error_code"] == 710022002
+
+
+@pytest.mark.asyncio
+async def test_country_restricted_message_uses_top_level_code(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_public_cookies(self: DolaClient) -> dict[str, str]:
+        return {"ttwid": "fresh"}
+
+    monkeypatch.setattr(DolaClient, "_fetch_public_cookies", fake_public_cookies)
+    session = await DolaClient().build_session()
+    payload = build_dola_payload(session.payload_template, "a swimmer", 10, "9:16")
+
+    with pytest.raises(DolaSubmissionError, match="country/region restricted") as exc_info:
+        parse_submit_response(
+            session,
+            payload,
+            Response(200, text='{"code":710022017,"msg":"Cici is not available in your country/region.","message":"country restricted no logout"}'),
+        )
+
+    assert exc_info.value.diagnostic["error_code"] == 710022017
+
+
+@pytest.mark.asyncio
+async def test_submit_uses_reusable_curl_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = DolaClient()
+    fake = FakeCurlSession(
+        [
+            Response(
+                200,
+                text='data: {"conversation_id":"12345","conversation_info":{"conversation_type":3}}',
+                request=Request("POST", "https://www.dola.com/chat/completion"),
+            )
+        ]
+    )
+    monkeypatch.setattr(client, "_session", lambda: fake)
+    session = DolaSession(
+        url="https://www.dola.com/chat/completion?fp=verify_test&web_platform=web",
+        headers={"cookie": "i18next=en; flow_user_country=BD; s_v_web_id=verify_test; ttwid=fresh"},
+        payload_template={},
+        fp="verify_test",
+        has_ttwid=True,
+        has_hook_slardar=False,
+        has_auth_cookies=False,
+    )
+    payload = build_dola_payload(base_payload("verify_test"), "a swimmer", 10, "9:16")
+
+    result = await client.submit(session, payload)
+
+    assert result.conversation_id == "12345"
+    assert fake.posts[0]["url"] == session.url
+    assert fake.posts[0]["headers"] == session.headers
+    assert fake.posts[0]["json"] == payload
+
+
+@pytest.mark.asyncio
+async def test_poll_video_id_returns_none_when_no_vid(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = DolaClient()
+    fake = FakeCurlSession(
+        [
+            Response(
+                200,
+                json={"code": 0, "data": {"messages": []}},
+                request=Request("POST", "https://www.dola.com/im/chain/single"),
+            )
+        ]
+    )
+    monkeypatch.setattr(client, "_session", lambda: fake)
+    session = DolaSession(
+        url="https://www.dola.com/chat/completion?fp=verify_test&web_platform=web",
+        headers={"cookie": "i18next=en; flow_user_country=BD; s_v_web_id=verify_test; ttwid=fresh"},
+        payload_template={},
+        fp="verify_test",
+        has_ttwid=True,
+        has_hook_slardar=False,
+        has_auth_cookies=False,
+    )
+
+    logs: list[str] = []
+
+    assert await client.poll_video_id(session, "12345", 3, max_attempts=1, sleep_seconds=0, log_fn=lambda message, _level: logs.append(message)) is None
+    assert fake.posts[0]["url"] == "https://www.dola.com/im/chain/single?fp=verify_test&web_platform=web"
+    assert logs == ["Polling video id 1/1"]
+
+
+@pytest.mark.asyncio
+async def test_poll_download_url_returns_none_without_play_info(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = DolaClient()
+    fake = FakeCurlSession(
+        [
+            Response(
+                200,
+                json={"code": 0, "data": {"play_infos": []}},
+                request=Request("POST", "https://www.dola.com/samantha/video/get_play_info"),
+            )
+        ]
+    )
+    monkeypatch.setattr(client, "_session", lambda: fake)
+    session = DolaSession(
+        url="https://www.dola.com/chat/completion?fp=verify_test&web_platform=web",
+        headers={"cookie": "i18next=en; flow_user_country=BD; s_v_web_id=verify_test; ttwid=fresh"},
+        payload_template={},
+        fp="verify_test",
+        has_ttwid=True,
+        has_hook_slardar=False,
+        has_auth_cookies=False,
+    )
+
+    cancel_checks = 0
+
+    def cancel_after_first_response() -> bool:
+        nonlocal cancel_checks
+        cancel_checks += 1
+        return cancel_checks > 1
+
+    logs: list[str] = []
+
+    assert await client.poll_download_url(session, "vid123", cancel_fn=cancel_after_first_response, log_fn=lambda message, _level: logs.append(message)) is None
+    assert fake.posts[0]["url"] == "https://www.dola.com/samantha/video/get_play_info?fp=verify_test&web_platform=web"
+    assert logs == ["Polling play_info 1/200", "Download URL polling cancelled."]
+
+
+def test_poll_attempt_constants_match_gui_progress_targets() -> None:
+    assert VIDEO_POLL_ATTEMPTS == 250
+    assert PLAY_INFO_POLL_ATTEMPTS == 200
 
 
 def test_parse_conversation_from_stream() -> None:
@@ -248,7 +399,7 @@ def test_parse_assistant_messages_redacts_urls() -> None:
 
 
 def test_parse_assistant_messages_ignores_prompt_echo() -> None:
-    text = 'data: {"message":{"content":"[{\\"content\\":{\\"text_block\\":{\\"text\\":\\"Generate video: a man swimming, 9:16\\"}}}]"}}'
+    text = 'data: {"message":{"content":"[{\\"content\\":{\\"text_block\\":{\\"text\\":\\"Generate exactly 10 seconds video. a man swimming\\"}}}]"}}'
 
     assert parse_assistant_messages_from_stream(text) == []
 

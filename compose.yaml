@@ -19,6 +19,17 @@ services:
     volumes:
       - auto_dola_redis:/data
 
+  browser:
+    build:
+      context: ./browser
+    shm_size: "1gb"
+    ports:
+      - "6080:6080"
+      - "9222:7070"
+    volumes:
+      - auto_dola_browser_profile:/data/browser-profile
+      - auto_dola_logs:/data/logs
+
   api:
     build:
       context: ./backend
@@ -35,8 +46,12 @@ services:
       LOG_DIR: /data/logs
       NICHES_DIR: /data/niches
       GENERATED_PROMPTS_DIR: /data/generated-prompts
+      DOLA_MODE: hybrid
+      DOLA_BROWSER_CDP_URL: http://browser:7070
+      DOLA_BROWSER_MANAGER_URL: http://browser:7070
+      DOLA_BROWSER_MANUAL_URL: http://localhost:6080
     ports:
-      - "8000:8000"
+      - "${AUTO_DOLA_API_PORT:-8000}:8000"
     volumes:
       - type: bind
         source: ${AUTO_DOLA_DOWNLOADS_DIR:-${USERPROFILE}/Downloads/AUTO-DOLA}
@@ -50,6 +65,8 @@ services:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_started
+      browser:
         condition: service_started
 
   worker:
@@ -69,6 +86,10 @@ services:
       LOG_DIR: /data/logs
       NICHES_DIR: /data/niches
       GENERATED_PROMPTS_DIR: /data/generated-prompts
+      DOLA_MODE: hybrid
+      DOLA_BROWSER_CDP_URL: http://browser:7070
+      DOLA_BROWSER_MANAGER_URL: http://browser:7070
+      DOLA_BROWSER_MANUAL_URL: http://localhost:6080
     volumes:
       - type: bind
         source: ${AUTO_DOLA_DOWNLOADS_DIR:-${USERPROFILE}/Downloads/AUTO-DOLA}
@@ -83,12 +104,14 @@ services:
         condition: service_healthy
       redis:
         condition: service_started
+      browser:
+        condition: service_started
 
   web:
     build:
       context: ./frontend
       args:
-        VITE_API_BASE: http://localhost:8000
+        VITE_API_BASE: http://localhost:${AUTO_DOLA_API_PORT:-8000}
         VITE_OUTPUT_LABEL: ${AUTO_DOLA_OUTPUT_LABEL:-Downloads/AUTO-DOLA}
     ports:
       - "3000:80"
@@ -100,3 +123,4 @@ volumes:
   auto_dola_redis:
   auto_dola_profiles:
   auto_dola_logs:
+  auto_dola_browser_profile:

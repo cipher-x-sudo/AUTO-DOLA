@@ -27,3 +27,7 @@ tmp/
 *.png
 *.jpg
 *.jpeg
+extracted/
+server_reextract/
+server.exe_extracted/
+server.exe_extracted_ng/

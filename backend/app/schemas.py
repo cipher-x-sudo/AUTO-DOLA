@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -13,7 +13,7 @@ class PromptItem(BaseModel):
 class VideoJobCreate(BaseModel):
     prompts: list[PromptItem] = Field(min_length=1)
     ratio: str = "9:16"
-    duration: int = Field(default=15, ge=5, le=60)
+    duration: Literal[5, 10, 15] = 10
     save_folder: str = ""
     parallel: int = Field(default=5, ge=1)
     clean_watermark: bool = True
@@ -76,12 +76,13 @@ class SettingsPayload(BaseModel):
     gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
     gemini_model: str = "gemini-2.5-flash"
     default_ratio: str = "9:16"
-    default_duration: int = 15
+    default_duration: int = 10
     default_parallel: int = 5
     output_dir: str = ""
     proxy_enabled: bool = False
     proxy_url: str = ""
     tts_default_voice: str = "en-US-AriaNeural"
+    dola_mode: Literal["direct", "browser", "hybrid"] = "hybrid"
 
 
 class ProxyTestRequest(BaseModel):
@@ -91,7 +92,7 @@ class ProxyTestRequest(BaseModel):
 class PromptGenerateRequest(BaseModel):
     master_prompt: str = Field(min_length=1)
     count: int = Field(default=5, ge=1)
-    duration: int = Field(default=15, ge=5, le=60)
+    duration: Literal[5, 10, 15] = 10
     ratio: str = "9:16"
     style: str = "cinematic realistic"
 
@@ -112,7 +113,7 @@ class NichePromptGenerateRequest(BaseModel):
     niche_ids: list[str] = Field(min_length=1)
     count: int = Field(default=5, ge=1)
     count_mode: str = "global"
-    duration: int = Field(default=15, ge=5, le=60)
+    duration: Literal[5, 10, 15] = 10
     style: str = "cinematic realistic"
     existing_prompts: list[str] = []
     save: bool = True

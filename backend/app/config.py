@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     auto_dola_inline_worker: bool = False
     dola_auth_cookies: str = ""
     dola_default_region: str = "BD"
+    dola_mode: str = "hybrid"
+    dola_browser_cdp_url: str = "http://localhost:9222"
+    dola_browser_manager_url: str = "http://localhost:9222"
+    dola_browser_manual_url: str = "http://localhost:6080"
     yousmind_api_key: str = ""
     gemini_api_key: str = ""
     gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta"

@@ -118,5 +118,5 @@ async def job_events(job_id: UUID):
 
 @router.get("/logs")
 def logs(session: Session = Depends(get_session)) -> list[dict]:
-    rows = session.exec(select(LogEvent).order_by(LogEvent.created_at.desc()).limit(500)).all()
+    rows = session.exec(select(LogEvent).order_by(LogEvent.created_at.desc()).limit(5000)).all()
     return [row.model_dump() for row in rows]

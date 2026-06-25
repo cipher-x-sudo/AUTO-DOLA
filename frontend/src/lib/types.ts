@@ -49,6 +49,26 @@ export interface SettingsPayload {
   proxy_enabled: boolean
   proxy_url: string
   tts_default_voice: string
+  dola_mode: "direct" | "browser" | "hybrid"
+}
+
+export interface DolaBrowserStatus {
+  ok: boolean
+  cdp: boolean
+  page_url: string
+  profile_persistent: boolean
+  manual_url: string
+  mode: "direct" | "browser" | "hybrid"
+  browser_proxy_active?: boolean
+  browser_proxy_host?: string
+  browser_ip?: string
+  page_count?: number
+  active_browser_count?: number
+  max_browser_slots?: number
+  active_cdp_ports?: number[]
+  last_submit_endpoint?: string
+  last_dola_error?: string
+  error?: string
 }
 
 export interface Niche {

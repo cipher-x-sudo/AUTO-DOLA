@@ -19,7 +19,7 @@ import {
 } from "lucide-react"
 import { toast } from "sonner"
 import { api, artifactUrl, subscribeJobEvents } from "@/lib/api"
-import type { Artifact, Job, JobItem, Niche, NichePromptGroup, SettingsPayload } from "@/lib/types"
+import type { Artifact, DolaBrowserStatus, Job, JobItem, Niche, NichePromptGroup, SettingsPayload } from "@/lib/types"
 import { Layout } from "@/components/Layout"
 import { JobTable } from "@/components/JobTable"
 import { Badge, Button, Card, Input, Progress, Select, Textarea } from "@/components/ui"
@@ -49,12 +49,13 @@ const emptySettings: SettingsPayload = {
   gemini_base_url: "https://generativelanguage.googleapis.com/v1beta",
   gemini_model: "gemini-2.5-flash",
   default_ratio: "9:16",
-  default_duration: 15,
+  default_duration: 10,
   default_parallel: 5,
   output_dir: "",
   proxy_enabled: false,
   proxy_url: "",
   tts_default_voice: "en-US-AriaNeural",
+  dola_mode: "hybrid",
 }
 
 type Page = "video" | "prompts" | "gallery" | "history"
@@ -86,11 +87,27 @@ interface VideoArtifact {
   job: Job
 }
 
+interface EngineTelemetryStats {
+  total: number
+  queued: number
+  generating: number
+  done: number
+  failed: number
+  timeoutError: number
+  captchaBlock: number
+  highDemand: number
+  dolaPolicy: number
+  noTextbox: number
+  browserEc: number
+  noExport: number
+}
+
 export default function App() {
   const [page, setPage] = useState<Page>(() => pageFromPath(window.location.pathname))
   const [jobs, setJobs] = useState<Job[]>([])
   const [settings, setSettings] = useState<SettingsPayload>(emptySettings)
   const [logs, setLogs] = useState<LogRow[]>([])
+  const [browserStatus, setBrowserStatus] = useState<DolaBrowserStatus | null>(null)
   const [loading, setLoading] = useState(true)
   const [studioPromptText, setStudioPromptText] = useState("")
 
@@ -122,10 +139,11 @@ export default function App() {
 
   const refresh = useCallback(async () => {
     try {
-      const [videoJobs, appSettings, logRows] = await Promise.all([api.videoJobs(), api.settings(), api.logs()])
+      const [videoJobs, appSettings, logRows, dolaBrowser] = await Promise.all([api.videoJobs(), api.settings(), api.logs(), api.dolaBrowser()])
       setJobs(videoJobs)
       setSettings(appSettings)
       setLogs(logRows)
+      setBrowserStatus(dolaBrowser)
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Failed to refresh")
     } finally {
@@ -149,12 +167,11 @@ export default function App() {
   }, [jobs, refresh, runningJobIds])
 
   const activeJob = useMemo(() => jobs.find((job) => job.status === "running" || job.status === "queued") ?? jobs[0], [jobs])
-  const recentLogs = useMemo(
+  const activeLogs = useMemo(
     () =>
       logs
         .filter((row) => !activeJob || row.job_id === activeJob.id)
-        .filter(isStudioLogVisible)
-        .slice(0, 16),
+        .filter(isStudioLogVisible),
     [activeJob, logs],
   )
   const videos = useMemo(() => collectVideoArtifacts(jobs), [jobs])
@@ -166,10 +183,12 @@ export default function App() {
           settings={settings}
           jobs={jobs}
           activeJob={activeJob}
-          logs={recentLogs}
+          logs={activeLogs}
+          browserStatus={browserStatus}
           promptText={studioPromptText}
           setPromptText={setStudioPromptText}
           onRefresh={refresh}
+          onSettingsSaved={setSettings}
         />
       )}
       {page === "prompts" && (
@@ -190,30 +209,40 @@ function VideoConsole({
   jobs,
   activeJob,
   logs,
+  browserStatus,
   promptText,
   setPromptText,
   onRefresh,
+  onSettingsSaved,
 }: {
   settings: SettingsPayload
   jobs: Job[]
   activeJob?: Job
   logs: LogRow[]
+  browserStatus: DolaBrowserStatus | null
   promptText: string
   setPromptText: (value: string) => void
   onRefresh: () => void
+  onSettingsSaved: (settings: SettingsPayload) => void
 }) {
   const [ratio, setRatio] = useState(settings.default_ratio || "9:16")
-  const [duration, setDuration] = useState(settings.default_duration || 15)
+  const [duration, setDuration] = useState(settings.default_duration || 10)
   const [parallel, setParallel] = useState(settings.default_parallel || 30)
   const [cleanWatermark, setCleanWatermark] = useState(true)
   const [saveMode, setSaveMode] = useState("final")
+  const [proxyEnabled, setProxyEnabled] = useState(settings.proxy_enabled)
+  const [proxyUrl, setProxyUrl] = useState(settings.proxy_url || "")
+  const [savingProxy, setSavingProxy] = useState(false)
+  const [testingProxy, setTestingProxy] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [logSearch, setLogSearch] = useState("")
 
   useEffect(() => {
     setRatio((current) => current || settings.default_ratio || "9:16")
-    setDuration((current) => current || settings.default_duration || 15)
+    setDuration((current) => current || settings.default_duration || 10)
     setParallel((current) => current || settings.default_parallel || 30)
+    setProxyEnabled(settings.proxy_enabled)
+    setProxyUrl(settings.proxy_url || "")
   }, [settings])
 
   const stats = useMemo(() => {
@@ -227,6 +256,8 @@ function VideoConsole({
       videos: collectVideoArtifacts(jobs).length,
     }
   }, [jobs])
+  const telemetry = useMemo(() => buildEngineTelemetry(jobs, logs), [jobs, logs])
+  const telemetryState = telemetry.captchaBlock || telemetry.noTextbox || telemetry.browserEc ? "BLOCKED" : telemetry.queued || telemetry.generating ? "RUNNING" : "READY"
 
   const progressTotal = activeJob?.total || stats.total || 0
   const progressDone = activeJob ? activeJob.done + activeJob.failed : stats.done + stats.failed
@@ -265,6 +296,39 @@ function VideoConsole({
     }
   }
 
+  async function saveProxySettings() {
+    setSavingProxy(true)
+    try {
+      const saved = await api.saveSettings({ ...settings, proxy_enabled: proxyEnabled, proxy_url: proxyUrl })
+      onSettingsSaved(saved)
+      toast.success("Proxy settings saved")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to save proxy settings")
+    } finally {
+      setSavingProxy(false)
+    }
+  }
+
+  async function testProxy() {
+    if (!proxyUrl.trim()) {
+      toast.error("Add proxy URL first.")
+      return
+    }
+    setTestingProxy(true)
+    try {
+      const result = await api.testProxy(proxyUrl)
+      if (result.ok) {
+        toast.success(result.ip ? `Proxy reachable: ${result.ip}` : result.message)
+      } else {
+        toast.error(result.message)
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Proxy test failed")
+    } finally {
+      setTestingProxy(false)
+    }
+  }
+
   return (
     <div className="mx-auto max-w-[1760px] space-y-5">
       <div className="flex flex-col gap-3 border-b border-border/70 pb-4 lg:flex-row lg:items-center lg:justify-between">
@@ -276,14 +340,7 @@ function VideoConsole({
 
       <OutputLocation path={HOST_OUTPUT_LABEL} containerPath={DOCKER_OUTPUT_DIR} />
 
-      <section className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
-        <StatBox label="Total" value={stats.total} />
-        <StatBox label="Queued" value={stats.queued} tone="amber" />
-        <StatBox label="Generating" value={stats.generating} tone="blue" />
-        <StatBox label="Done" value={stats.done} tone="green" />
-        <StatBox label="Failed" value={stats.failed} tone="red" />
-        <StatBox label="Videos" value={stats.videos} tone="amber" />
-      </section>
+      <EngineTelemetry stats={telemetry} state={telemetryState} />
 
       <Card className="px-4 py-3">
         <div className="mb-2 flex items-center justify-between gap-3">
@@ -306,8 +363,18 @@ function VideoConsole({
             setCleanWatermark={setCleanWatermark}
             saveMode={saveMode}
             setSaveMode={setSaveMode}
+            proxyEnabled={proxyEnabled}
+            setProxyEnabled={setProxyEnabled}
+            proxyUrl={proxyUrl}
+            setProxyUrl={setProxyUrl}
+            savingProxy={savingProxy}
+            testingProxy={testingProxy}
+            settings={settings}
+            browserStatus={browserStatus}
             submitting={submitting}
             hasActiveJob={!!activeJob && ["queued", "running"].includes(activeJob.status)}
+            onSaveProxy={saveProxySettings}
+            onTestProxy={testProxy}
             onStart={submit}
             onStop={stopGeneration}
           />
@@ -356,8 +423,18 @@ function GenerationSettings({
   setCleanWatermark,
   saveMode,
   setSaveMode,
+  proxyEnabled,
+  setProxyEnabled,
+  proxyUrl,
+  setProxyUrl,
+  savingProxy,
+  testingProxy,
+  settings,
+  browserStatus,
   submitting,
   hasActiveJob,
+  onSaveProxy,
+  onTestProxy,
   onStart,
   onStop,
 }: {
@@ -371,8 +448,18 @@ function GenerationSettings({
   setCleanWatermark: (value: boolean) => void
   saveMode: string
   setSaveMode: (value: string) => void
+  proxyEnabled: boolean
+  setProxyEnabled: (value: boolean) => void
+  proxyUrl: string
+  setProxyUrl: (value: string) => void
+  savingProxy: boolean
+  testingProxy: boolean
+  settings: SettingsPayload
+  browserStatus: DolaBrowserStatus | null
   submitting: boolean
   hasActiveJob: boolean
+  onSaveProxy: () => void
+  onTestProxy: () => void
   onStart: () => void
   onStop: () => void
 }) {
@@ -388,8 +475,6 @@ function GenerationSettings({
             <option value="5">5</option>
             <option value="10">10</option>
             <option value="15">15</option>
-            <option value="30">30</option>
-            <option value="60">60</option>
           </Select>
         </Field>
         <Field label="Aspect Ratio">
@@ -413,6 +498,53 @@ function GenerationSettings({
             <option value="both">Both raw and final</option>
           </Select>
         </Field>
+        <label className="flex min-h-10 items-center gap-3 rounded-md border border-border bg-background px-3 text-xs font-black uppercase tracking-wide text-muted-foreground sm:col-span-2">
+          <input type="checkbox" checked={proxyEnabled} onChange={(event) => setProxyEnabled(event.target.checked)} className="h-4 w-4 accent-[hsl(var(--primary))]" />
+          Use proxy for Dola session + submit
+        </label>
+        <Field label="Proxy URL" className="sm:col-span-2">
+          <Input
+            value={proxyUrl}
+            onChange={(event) => setProxyUrl(event.target.value)}
+            placeholder="http://user:pass@host:port"
+          />
+        </Field>
+        <div className="grid grid-cols-2 gap-2 sm:col-span-2">
+          <Button variant="secondary" onClick={onTestProxy} disabled={testingProxy || !proxyUrl.trim()}>
+            {testingProxy ? <Loader2 className="animate-spin" size={16} /> : <Zap size={16} />}
+            Test Proxy
+          </Button>
+          <Button variant="secondary" onClick={onSaveProxy} disabled={savingProxy}>
+            {savingProxy ? <Loader2 className="animate-spin" size={16} /> : <Settings2 size={16} />}
+            Save Proxy
+          </Button>
+        </div>
+        <div className="rounded-md border border-border bg-background p-3 sm:col-span-2">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="min-w-0">
+              <div className="text-[11px] font-black uppercase tracking-wide text-muted-foreground">Dola Browser</div>
+              <div className="mt-1 truncate text-xs font-bold text-foreground">
+                {browserStatus?.ok ? "Connected" : "Disconnected"} - mode {settings.dola_mode}
+              </div>
+              <div className="mt-1 truncate text-[11px] font-semibold text-muted-foreground">{browserStatus?.page_url || browserStatus?.error || "Browser status unavailable"}</div>
+              <div className="mt-1 truncate text-[11px] font-semibold text-muted-foreground">
+                Browser proxy: {browserStatus?.browser_proxy_active ? `active ${browserStatus.browser_proxy_host || ""}` : "inactive"}
+                {browserStatus?.browser_ip ? ` - IP ${browserStatus.browser_ip}` : ""}
+                {typeof browserStatus?.active_browser_count === "number" ? ` - active ${browserStatus.active_browser_count}/${browserStatus.max_browser_slots || 0}` : ""}
+                {browserStatus?.active_cdp_ports?.length ? ` - ports ${browserStatus.active_cdp_ports.join(",")}` : ""}
+              </div>
+              {(browserStatus?.last_submit_endpoint || browserStatus?.last_dola_error) && (
+                <div className="mt-1 truncate text-[11px] font-semibold text-muted-foreground">
+                  Last submit: {browserStatus.last_submit_endpoint || "none"} {browserStatus.last_dola_error ? `- ${browserStatus.last_dola_error}` : ""}
+                </div>
+              )}
+            </div>
+            <Button variant="secondary" className="h-9 shrink-0 px-3 text-xs" onClick={() => window.open(browserStatus?.manual_url || "http://localhost:6080", "_blank")}>
+              <Terminal size={14} />
+              Open
+            </Button>
+          </div>
+        </div>
       </div>
       <Button className="mt-5 h-12 w-full bg-[#ff225c] text-white hover:bg-[#ff3b6f]" onClick={hasActiveJob ? onStop : onStart} disabled={submitting}>
         {submitting ? <Loader2 className="animate-spin" size={17} /> : hasActiveJob ? <Square size={15} /> : <Play size={16} />}
@@ -500,9 +632,9 @@ function GenerationQueue({ items }: { items: JobItem[] }) {
             {pageItems.map((item, index) => (
               <tr key={item.id} className="border-t border-border">
                 <td className="px-3 py-3 text-muted-foreground">{start + index + 1}</td>
-                <td className="max-w-[260px] truncate px-3 py-3 font-bold">{item.prompt}</td>
+                <td className="max-w-[320px] truncate px-3 py-3 font-bold">{item.prompt}</td>
                 <td className="px-3 py-3"><Badge tone={tone(item.status)}>{item.status}</Badge></td>
-                <td className="max-w-[240px] truncate px-3 py-3 text-muted-foreground">{item.error || item.action || "Waiting..."}</td>
+                <td className="max-w-[520px] truncate px-3 py-3 text-muted-foreground">{item.error || item.action || "Waiting..."}</td>
               </tr>
             ))}
             {!items.length && <tr><td className="px-3 py-5 text-center text-muted-foreground" colSpan={4}>No queued videos yet.</td></tr>}
@@ -531,13 +663,13 @@ function LiveLogConsole({ logs, search, setSearch }: { logs: LogRow[]; search: s
           <IconButton label="Download"><Download size={15} /></IconButton>
         </div>
       </div>
-      <div className="h-[235px] overflow-auto bg-black p-4 font-mono text-xs leading-7 text-cyan-300 shadow-inner shadow-primary/10">
+      <div className="h-[420px] overflow-auto bg-black p-4 font-mono text-xs leading-6 text-cyan-300 shadow-inner shadow-primary/10">
         {logs.map((row, index) => (
-          <div key={row.id} className="grid grid-cols-[42px_82px_42px_minmax(0,1fr)] gap-2">
+          <div key={row.id} className="grid grid-cols-[42px_82px_42px_minmax(0,1fr)] items-start gap-2">
             <span className="text-slate-500">{String(index + 1).padStart(3, "0")}</span>
             <span className="text-slate-500">[{new Date(row.created_at).toLocaleTimeString()}]</span>
             <span className={row.level === "error" ? "text-red-300" : row.level === "warn" ? "text-amber-300" : "text-emerald-300"}>{row.level.toUpperCase()}</span>
-            <span className="break-words">{row.message}</span>
+            <span className="whitespace-pre-wrap break-words">{row.message}</span>
           </div>
         ))}
         {!logs.length && <div className="text-muted-foreground">No live logs yet. Start a generation to stream worker events.</div>}
@@ -624,7 +756,7 @@ function PromptGenerator({
   const [idea, setIdea] = useState("")
   const [count, setCount] = useState(5)
   const [countMode, setCountMode] = useState<"global" | "per_niche">("global")
-  const [duration, setDuration] = useState(15)
+  const [duration, setDuration] = useState(10)
   const [apiKey, setApiKey] = useState(settings.gemini_api_key || "")
   const [baseUrl, setBaseUrl] = useState(settings.gemini_base_url || "https://generativelanguage.googleapis.com/v1beta")
   const [model, setModel] = useState(settings.gemini_model || "gemini-2.5-flash")
@@ -1009,8 +1141,6 @@ function PromptGenerator({
                   <option value="5">5</option>
                   <option value="10">10</option>
                   <option value="15">15</option>
-                  <option value="30">30</option>
-                  <option value="60">60</option>
                 </Select>
               </Field>
             </div>
@@ -1124,13 +1254,48 @@ function History({ jobs, onRefresh }: { jobs: Job[]; onRefresh: () => void }) {
   )
 }
 
-function StatBox({ label, value, tone: statTone = "default" }: { label: string; value: number; tone?: "default" | "green" | "red" | "amber" | "blue" }) {
-  const color = statTone === "green" ? "text-emerald-300" : statTone === "red" ? "text-[#ff225c]" : statTone === "amber" ? "text-amber-300" : statTone === "blue" ? "text-indigo-300" : "text-foreground"
+function EngineTelemetry({ stats, state }: { stats: EngineTelemetryStats; state: "READY" | "RUNNING" | "BLOCKED" }) {
+  const items: Array<{ key: keyof EngineTelemetryStats; label: string; tone: "default" | "green" | "red" | "amber" | "blue" | "pink" | "violet" }> = [
+    { key: "total", label: "Total", tone: "default" },
+    { key: "queued", label: "Queued", tone: "blue" },
+    { key: "generating", label: "Generating", tone: "amber" },
+    { key: "done", label: "Done", tone: "green" },
+    { key: "failed", label: "Failed", tone: "red" },
+    { key: "timeoutError", label: "Timeout Error", tone: "amber" },
+    { key: "captchaBlock", label: "Captcha Block", tone: "red" },
+    { key: "highDemand", label: "High Demand", tone: "amber" },
+    { key: "dolaPolicy", label: "Dola Policy", tone: "pink" },
+    { key: "noTextbox", label: "No Textbox", tone: "violet" },
+    { key: "browserEc", label: "Browser EC", tone: "red" },
+    { key: "noExport", label: "No Export", tone: "amber" },
+  ]
+  const stateClass = state === "READY" ? "text-emerald-300" : state === "RUNNING" ? "text-amber-300" : "text-red-300"
+
   return (
-    <Card className="flex min-h-[70px] flex-col items-center justify-center p-3">
-      <div className={`text-2xl font-black ${color}`}>{value}</div>
-      <div className="mt-1 text-[10px] font-black uppercase tracking-[0.16em] text-muted-foreground">{label}</div>
+    <Card className="bg-[#17172a] p-4">
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <div className="text-[10px] font-black uppercase tracking-[0.32em] text-amber-200">Engine Telemetry</div>
+        <div className={`text-[10px] font-black uppercase tracking-wide ${stateClass}`}>- {state}</div>
+      </div>
+      <div className="grid grid-cols-2 gap-2 md:grid-cols-3 xl:grid-cols-6">
+        {items.map((item) => (
+          <TelemetryTile key={item.key} label={item.label} value={stats[item.key]} tone={item.tone} />
+        ))}
+      </div>
     </Card>
+  )
+}
+
+function TelemetryTile({ label, value, tone: tileTone }: { label: string; value: number; tone: "default" | "green" | "red" | "amber" | "blue" | "pink" | "violet" }) {
+  const dot = tileTone === "green" ? "bg-emerald-400" : tileTone === "red" ? "bg-red-400" : tileTone === "amber" ? "bg-amber-400" : tileTone === "blue" ? "bg-sky-400" : tileTone === "pink" ? "bg-pink-400" : tileTone === "violet" ? "bg-violet-400" : "bg-indigo-300"
+  return (
+    <div className="flex h-10 min-w-0 items-center justify-between gap-3 rounded-md border border-border bg-[#10111d] px-3">
+      <div className="flex min-w-0 items-center gap-2">
+        <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${dot}`} />
+        <span className="truncate text-xs font-semibold text-muted-foreground">{label}</span>
+      </div>
+      <span className="shrink-0 text-sm font-black text-foreground">{value}</span>
+    </div>
   )
 }
 
@@ -1203,6 +1368,75 @@ function collectVideoArtifacts(jobs: Job[]): VideoArtifact[] {
       .filter((artifact) => artifact.kind === "video" && artifact.mime_type === "video/mp4")
       .map((artifact) => ({ artifact, job })),
   )
+}
+
+function buildEngineTelemetry(jobs: Job[], logs: LogRow[]): EngineTelemetryStats {
+  const items = jobs.flatMap((job) => job.items)
+  const stats: EngineTelemetryStats = {
+    total: items.length,
+    queued: items.filter((item) => item.status === "queued").length,
+    generating: items.filter((item) => item.status === "running").length,
+    done: items.filter((item) => item.status === "completed").length,
+    failed: items.filter((item) => item.status === "failed").length,
+    timeoutError: 0,
+    captchaBlock: 0,
+    highDemand: 0,
+    dolaPolicy: 0,
+    noTextbox: 0,
+    browserEc: 0,
+    noExport: 0,
+  }
+  const counted = new Set<string>()
+  for (const item of items) {
+    const bucket = classifyTelemetryText(`${item.error || ""} ${item.action || ""}`)
+    if (bucket) {
+      stats[bucket] += 1
+      counted.add(`${item.id}:${bucket}`)
+    }
+  }
+  const itemByShortId = new Map(items.map((item) => [item.id.slice(0, 8), item]))
+  for (const row of logs) {
+    const message = row.message || ""
+    const bucket = classifyTelemetryText(message)
+    if (!bucket) continue
+    const shortId = message.match(/\| ([a-f0-9]{8})\]/i)?.[1]
+    if (shortId) {
+      const item = itemByShortId.get(shortId)
+      if (item) {
+        const key = `${item.id}:${bucket}`
+        if (counted.has(key)) continue
+        counted.add(key)
+        stats[bucket] += 1
+        continue
+      }
+    }
+    const logKey = `${row.id}:${bucket}`
+    if (!counted.has(logKey)) {
+      counted.add(logKey)
+      stats[bucket] += 1
+    }
+  }
+  for (const item of items) {
+    if (item.status !== "failed" || item.artifact_id) continue
+    const text = `${item.error || ""} ${item.action || ""}`.toLowerCase()
+    if (text.includes("download") || text.includes("export") || text.includes("mp4") || !classifyTelemetryText(text)) {
+      stats.noExport += 1
+    }
+  }
+  return stats
+}
+
+function classifyTelemetryText(value: string): keyof Pick<EngineTelemetryStats, "timeoutError" | "captchaBlock" | "highDemand" | "dolaPolicy" | "noTextbox" | "browserEc" | "noExport"> | null {
+  const text = value.toLowerCase()
+  if (!text.trim()) return null
+  if (text.includes("captcha") || text.includes("manual verification") || text.includes("requires manual verification")) return "captchaBlock"
+  if (text.includes("chat input not found") || text.includes("textbox")) return "noTextbox"
+  if (text.includes("econnrefused") || text.includes("connect_over_cdp") || text.includes("browser manager") || text.includes("cdp") || text.includes("net::")) return "browserEc"
+  if (text.includes("high demand") || text.includes("710022002")) return "highDemand"
+  if (text.includes("policy") || text.includes("violate") || text.includes("content") || text.includes("flagged") || text.includes("rejected this prompt")) return "dolaPolicy"
+  if (text.includes("timeout") || text.includes("timed out") || text.includes("did not return") || text.includes("no video id") || text.includes("no play_info")) return "timeoutError"
+  if (text.includes("download") || text.includes("export") || text.includes("mp4")) return "noExport"
+  return null
 }
 
 function tone(status: string): "default" | "success" | "warn" | "error" | "muted" {

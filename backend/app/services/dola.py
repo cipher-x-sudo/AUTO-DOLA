@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import parse_qs, urlparse
 
-import httpx
+from curl_cffi import requests as curl_requests
 
 
 AUTH_COOKIE_PATHS = (
@@ -21,12 +21,15 @@ AUTH_COOKIE_PATHS = (
 )
 
 ANDROID_WEBVIEW_UA = (
-    "Mozilla/5.0 (Linux; Android 13; SM-S918B Build/TP1A.220624.014; wv) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/118.0.0.0 Mobile Safari/537.36"
+    "Mozilla/5.0 (Linux; Android 14; SM-S928B Build/UP1A.231005.007; wv) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/130.0.0.0 Mobile Safari/537.36"
 )
-PAYLOAD_TEMPLATE_VERSION = "browser-2026-06-19"
+NEXUS_CHROME_IMPERSONATE = "chrome110"
+PAYLOAD_TEMPLATE_VERSION = "nexus-anonymous-2026-06-25"
 VIDEO_POLL_ATTEMPTS = 250
 VIDEO_POLL_INTERVAL_SECONDS = 5
+PLAY_INFO_POLL_ATTEMPTS = 200
+PLAY_INFO_POLL_INTERVAL_SECONDS = 5
 VIDEO_FAILURE_MARKERS = (
     "failed to generate",
     "generation failed",
@@ -91,6 +94,22 @@ class DolaClient:
         self.region = region
         self.timeout = timeout
         self.proxy = proxy.strip() or None
+        self._http: curl_requests.AsyncSession | None = None
+
+    async def aclose(self) -> None:
+        if self._http:
+            await self._http.close()
+            self._http = None
+
+    def _session(self) -> curl_requests.AsyncSession:
+        if self._http is None:
+            self._http = curl_requests.AsyncSession(
+                timeout=self.timeout,
+                verify=False,
+                impersonate=NEXUS_CHROME_IMPERSONATE,
+                proxy=self.proxy,
+            )
+        return self._http
 
     async def build_session(self) -> DolaSession:
         device_id = str(uuid.uuid4().int)[:19]
@@ -107,15 +126,15 @@ class DolaClient:
         )
         public_cookies = await self._fetch_public_cookies()
         if not public_cookies.get("ttwid"):
-            raise RuntimeError("Could not establish Dola session: no ttwid cookie.")
-        auth_cookies = read_auth_cookies(self.auth_cookies)
+            raise RuntimeError("Public Dola session failed: no ttwid cookie.")
+        auth_cookies: dict[str, str] = {}
         merged_cookies = merge_cookies(
             {"i18next": "en", "flow_user_country": self.region, "s_v_web_id": fp},
-            auth_cookies,
             public_cookies,
         )
         headers = {
             "accept": "*/*",
+            "accept-language": "en-US,en;q=0.9",
             "agw-js-conv": "str, str",
             "content-type": "application/json",
             "cookie": format_cookie_header(merged_cookies),
@@ -123,9 +142,10 @@ class DolaClient:
             "origin": "https://www.dola.com",
             "referer": "https://www.dola.com/chat/",
             "user-agent": ANDROID_WEBVIEW_UA,
-            "sec-ch-ua": '"Chromium";v="118", "Android WebView";v="118", "Not=A?Brand";v="99"',
+            "sec-ch-ua": '"Chromium";v="130", "Android WebView";v="130", "Not?A_Brand";v="99"',
             "sec-ch-ua-mobile": "?1",
             "sec-ch-ua-platform": '"Android"',
+            "x-requested-with": "com.android.browser",
         }
         return DolaSession(
             url=url,
@@ -141,17 +161,18 @@ class DolaClient:
         try:
             headers = {
                 "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "accept-language": "en-US,en;q=0.9",
                 "user-agent": ANDROID_WEBVIEW_UA,
-                "sec-ch-ua": '"Chromium";v="118", "Android WebView";v="118", "Not=A?Brand";v="99"',
+                "sec-ch-ua": '"Chromium";v="130", "Android WebView";v="130", "Not?A_Brand";v="99"',
                 "sec-ch-ua-mobile": "?1",
                 "sec-ch-ua-platform": '"Android"',
+                "upgrade-insecure-requests": "1",
             }
-            async with httpx.AsyncClient(timeout=15, verify=False, follow_redirects=True, headers=headers, proxy=self.proxy) as client:
-                response = await client.get("https://www.dola.com/")
-                cookies = parse_set_cookie_headers(response.headers.get_list("set-cookie"))
-                cookies.update({key: value for key, value in response.cookies.items()})
-                cookies.update({key: value for key, value in client.cookies.items()})
-                return cookies
+            response = await self._session().get("https://www.dola.com/", headers=headers, allow_redirects=True, timeout=15)
+            cookies = parse_set_cookie_headers(extract_set_cookie_headers(response.headers))
+            cookies.update({key: value for key, value in response.cookies.items()})
+            cookies.update({key: value for key, value in self._session().cookies.items()})
+            return cookies
         except Exception as exc:
             import logging
             logging.getLogger(__name__).warning("Failed to fetch public Dola cookies: %s", exc)
@@ -165,8 +186,7 @@ class DolaClient:
         raw_response_fn: Callable[[str, int, int, str], None] | None = None,
         attempt: int = 1,
     ) -> DolaSubmitResult:
-        async with httpx.AsyncClient(timeout=self.timeout, verify=False, proxy=self.proxy) as client:
-            response = await client.post(session.url, headers=session.headers, json=payload)
+        response = await self._session().post(session.url, headers=session.headers, json=payload)
         if raw_response_fn:
             raw_response_fn("submit", attempt, response.status_code, response.text)
         return parse_submit_response(session, payload, response)
@@ -189,37 +209,36 @@ class DolaClient:
         headers["agw-js-conv"] = "str"
         body = build_chain_poll_body(conversation_id, conversation_type)
         seen_messages: set[str] = set()
-        async with httpx.AsyncClient(timeout=self.timeout, verify=False, proxy=self.proxy) as client:
-            for attempt in range(1, max_attempts + 1):
-                if cancel_fn and cancel_fn():
-                    if log_fn:
-                        log_fn("Video polling cancelled.", "warn")
-                    return None
+        for attempt in range(1, max_attempts + 1):
+            if cancel_fn and cancel_fn():
                 if log_fn:
-                    log_fn(f"Processing video request (attempt {attempt}/{max_attempts})...", "info")
-                body["sequence_id"] = str(uuid.uuid4())
-                response = await client.post(url, headers=headers, json=body)
-                if raw_response_fn:
-                    raw_response_fn("chain_poll", attempt, response.status_code, response.text)
-                if response.status_code == 200:
-                    payload = response.json()
-                    vid, _ = parse_vid_with_diagnostics(payload)
-                    if vid:
-                        if log_fn:
-                            log_fn("Dola returned video id.", "success")
-                        return vid
+                    log_fn("Video polling cancelled.", "warn")
+                return None
+            if log_fn:
+                log_fn(f"Polling video id {attempt}/{max_attempts}", "info")
+            body["sequence_id"] = str(uuid.uuid4())
+            response = await self._session().post(url, headers=headers, json=body)
+            if raw_response_fn:
+                raw_response_fn("chain_poll", attempt, response.status_code, response.text)
+            if response.status_code == 200:
+                payload = response.json()
+                vid, _ = parse_vid_with_diagnostics(payload)
+                if vid:
+                    if log_fn:
+                        log_fn("Dola returned video id.", "success")
+                    return vid
 
-                    for message in extract_chain_texts(payload):
-                        if message not in seen_messages:
-                            seen_messages.add(message)
-                            if log_fn:
-                                level = "warn" if is_terminal_video_failure(message) else "info"
-                                log_fn(message[:500], level)
-                        if is_terminal_video_failure(message):
-                            raise DolaTerminalGenerationError(f"Dola rejected this prompt: {message[:500]}")
-                elif log_fn and attempt == 1:
-                    log_fn(f"Dola chain poll returned HTTP {response.status_code}.", "warn")
-                await asyncio.sleep(sleep_seconds)
+                for message in extract_chain_texts(payload):
+                    if message not in seen_messages:
+                        seen_messages.add(message)
+                        if log_fn:
+                            level = "warn" if is_terminal_video_failure(message) else "info"
+                            log_fn(message[:500], level)
+                    if is_terminal_video_failure(message):
+                        raise DolaTerminalGenerationError(f"Dola rejected this prompt: {message[:500]}")
+            elif log_fn and attempt == 1:
+                log_fn(f"Dola chain poll returned HTTP {response.status_code}.", "warn")
+            await asyncio.sleep(sleep_seconds)
         return None
 
     async def poll_download_url(
@@ -230,33 +249,36 @@ class DolaClient:
         raw_response_fn: Callable[[str, int, int, str], None] | None = None,
         cancel_fn: Callable[[], bool] | None = None,
         log_fn: Callable[[str, str], None] | None = None,
+        max_attempts: int = PLAY_INFO_POLL_ATTEMPTS,
+        sleep_seconds: float = PLAY_INFO_POLL_INTERVAL_SECONDS,
     ) -> str | None:
         url = session.url.replace("chat/completion", "samantha/video/get_play_info")
         headers = {k: v for k, v in session.headers.items() if k.lower() not in {"content-type", "accept-encoding"}}
         headers["content-type"] = "application/json"
-        async with httpx.AsyncClient(timeout=self.timeout, verify=False) as client:
-            for attempt in range(1, 201):
+        for attempt in range(1, max_attempts + 1):
+            if cancel_fn and cancel_fn():
+                if log_fn:
+                    log_fn("Download URL polling cancelled.", "warn")
+                return None
+            if log_fn:
+                log_fn(f"Polling play_info {attempt}/{max_attempts}", "info")
+            response = await self._session().post(url, headers=headers, json={"vid": vid})
+            if raw_response_fn:
+                raw_response_fn("play_info", attempt, response.status_code, response.text)
+            if response.status_code == 200:
+                download_url = parse_play_info(response.json())
+                if download_url:
+                    return download_url
+            for _ in range(max(1, int(sleep_seconds / 0.5))):
                 if cancel_fn and cancel_fn():
                     if log_fn:
                         log_fn("Download URL polling cancelled.", "warn")
                     return None
-                response = await client.post(url, headers=headers, json={"vid": vid})
-                if raw_response_fn:
-                    raw_response_fn("play_info", attempt, response.status_code, response.text)
-                if response.status_code == 200:
-                    download_url = parse_play_info(response.json())
-                    if download_url:
-                        return download_url
-                for _ in range(10):
-                    if cancel_fn and cancel_fn():
-                        if log_fn:
-                            log_fn("Download URL polling cancelled.", "warn")
-                        return None
-                    await asyncio.sleep(0.5)
+                await asyncio.sleep(0.5)
         return None
 
 
-def parse_submit_response(session: DolaSession, payload: dict[str, Any], response: httpx.Response) -> DolaSubmitResult:
+def parse_submit_response(session: DolaSession, payload: dict[str, Any], response: Any) -> DolaSubmitResult:
     diagnostic = build_submit_diagnostic(session, payload, response)
     try:
         response.raise_for_status()
@@ -267,11 +289,17 @@ def parse_submit_response(session: DolaSession, payload: dict[str, Any], respons
             assistant_messages=parse_assistant_messages_from_stream(response.text),
         )
     except Exception as exc:
-        message = str(exc)
+        message = "Dola rejected anonymous session."
         if "common invalid param" in response.text.lower():
             message = "Dola rejected the request payload/session: common invalid param."
         elif diagnostic.get("error_code") == 710022002:
-            message = "Dola is experiencing high demand. Retrying may succeed."
+            message = "Dola is experiencing high demand. Please try again later."
+        elif diagnostic.get("error_code") == 710022017:
+            message = "Dola country/region restricted this session."
+        elif "Could not parse conversation_id" in str(exc):
+            message = "Dola did not return conversation_id."
+        elif response.status_code in {401, 403, 429}:
+            message = f"Dola rejected anonymous session: HTTP {response.status_code}."
         raise DolaSubmissionError(message, diagnostic) from exc
 
 
@@ -418,6 +446,17 @@ def parse_set_cookie_headers(headers: list[str]) -> dict[str, str]:
     return cookies
 
 
+def extract_set_cookie_headers(headers: Any) -> list[str]:
+    if hasattr(headers, "get_list"):
+        return list(headers.get_list("set-cookie"))
+    if hasattr(headers, "get_all"):
+        return list(headers.get_all("set-cookie"))
+    value = headers.get("set-cookie", "") if hasattr(headers, "get") else ""
+    if not value:
+        return []
+    return [value]
+
+
 def merge_cookies(*sources: dict[str, str]) -> dict[str, str]:
     merged: dict[str, str] = {}
     for source in sources:
@@ -436,21 +475,21 @@ def cookie_names_from_header(cookie_header: str) -> list[str]:
 
 
 def parse_dola_stream_error(text: str) -> tuple[int | None, str]:
-    code_match = re.search(r'"error_code"\s*:\s*([0-9]+)', text)
+    code_match = re.search(r'"(?:error_code|code)"\s*:\s*([0-9]+)', text)
     message_match = re.search(r'"(?:error_msg|message|msg)"\s*:\s*"([^"]+)"', text)
     return (int(code_match.group(1)) if code_match else None, message_match.group(1) if message_match else "")
 
 
-def build_submit_diagnostic(session: DolaSession, payload: dict[str, Any], response: httpx.Response) -> dict[str, Any]:
+def build_submit_diagnostic(session: DolaSession, payload: dict[str, Any], response: Any) -> dict[str, Any]:
     ability = payload.get("chat_ability", {})
     try:
         ability_param = json.loads(ability.get("ability_param", "{}"))
     except (TypeError, json.JSONDecodeError):
         ability_param = {}
     text = payload["messages"][0]["content_block"][0]["content"]["text_block"]["text"]
-    ratio = text.rsplit(",", 1)[-1].strip() if "," in text else ""
     cookie_names = cookie_names_from_header(session.headers.get("cookie", ""))
     query = parse_qs(urlparse(session.url).query)
+    query_keys = sorted(query.keys())
     error_code, error_msg = parse_dola_stream_error(response.text)
     return {
         "status_code": response.status_code,
@@ -463,13 +502,15 @@ def build_submit_diagnostic(session: DolaSession, payload: dict[str, Any], respo
         "option_key_count": len(payload.get("option", {})),
         "has_ext_fp": bool(payload.get("ext", {}).get("fp")),
         "fp_matches_url": payload.get("ext", {}).get("fp") == query.get("fp", [""])[0] == session.fp,
+        "fp_matches_cookie": f"s_v_web_id={session.fp}" in session.headers.get("cookie", ""),
+        "url_query_keys": query_keys,
         "url_has_web_platform": query.get("web_platform", [""])[0] == "web",
         "model": ability_param.get("model"),
         "duration": ability_param.get("duration"),
-        "ratio": ratio,
+        "prompt_text": sanitize_dola_log_message(text)[:300],
         "error_code": error_code,
         "error_msg": error_msg,
-        "body_snippet": response.text[:500].replace("\n", " "),
+        "body_snippet": sanitize_dola_log_message(response.text.replace("\n", " ")),
     }
 
 
@@ -486,10 +527,12 @@ def format_diagnostic(diagnostic: dict[str, Any]) -> str:
         f"option_keys={diagnostic.get('option_key_count')}, "
         f"ext_fp={diagnostic.get('has_ext_fp')}, "
         f"fp_matches_url={diagnostic.get('fp_matches_url')}, "
+        f"fp_matches_cookie={diagnostic.get('fp_matches_cookie')}, "
+        f"url_query_keys={diagnostic.get('url_query_keys')}, "
         f"web_platform={diagnostic.get('url_has_web_platform')}, "
         f"model={diagnostic.get('model')}, "
         f"duration={diagnostic.get('duration')}, "
-        f"ratio={diagnostic.get('ratio')}, "
+        f"prompt={diagnostic.get('prompt_text')}, "
         f"error_code={diagnostic.get('error_code')}, "
         f"error_msg={diagnostic.get('error_msg')}, "
         f"body={diagnostic.get('body_snippet')}"
@@ -508,18 +551,20 @@ async def dola_session_status(auth_cookies: str = "", region: str = "BD") -> dic
             "region": region,
         }
     except Exception as exc:
-        return {"ok": False, "has_ttwid": False, "has_auth_cookies": bool(read_auth_cookies(auth_cookies)), "region": region, "error": str(exc)}
+        return {"ok": False, "has_ttwid": False, "has_auth_cookies": False, "region": region, "error": str(exc)}
 
 
 def build_dola_payload(template: dict[str, Any], prompt: str, duration: int, ratio: str) -> dict[str, Any]:
     payload = json.loads(json.dumps(template))
+    duration = int(duration)
+    ratio = str(ratio or "9:16")
     payload["messages"][0]["local_message_id"] = str(uuid.uuid4())
     payload["messages"][0]["content_block"][0]["block_id"] = str(uuid.uuid4())
-    payload["messages"][0]["content_block"][0]["content"]["text_block"]["text"] = f"Generate video: {prompt}, {ratio}"
+    payload["messages"][0]["content_block"][0]["content"]["text_block"]["text"] = build_video_prompt_text(prompt, duration, ratio)
     payload["option"]["unique_key"] = str(uuid.uuid4())
     payload["option"]["create_time_ms"] = int(time.time() * 1000)
     payload["option"]["recovery_option"]["req_create_time_sec"] = int(time.time())
-    payload["chat_ability"] = {"ability_type": 17, "ability_param": json.dumps({"model": "seedance_v2.0", "duration": int(duration)}, separators=(",", ":"))}
+    payload["chat_ability"] = {"ability_type": 17, "ability_param": json.dumps({"model": "seedance_v2.0", "duration": duration, "ratio": ratio}, separators=(",", ":"))}
     payload["client_meta"]["conversation_id"] = ""
     payload["client_meta"]["last_section_id"] = ""
     payload["client_meta"]["last_message_index"] = None
@@ -528,6 +573,13 @@ def build_dola_payload(template: dict[str, Any], prompt: str, duration: int, rat
     payload["option"]["conversation_init_option"] = {"need_ack_conversation": True}
     payload["ext"]["conversation_init_option"] = '{"need_ack_conversation":true}'
     return payload
+
+
+def build_video_prompt_text(prompt: str, duration: int, ratio: str) -> str:
+    ratio = str(ratio or "9:16")
+    orientation = "vertical" if ratio == "9:16" else "horizontal" if ratio == "16:9" else "square" if ratio == "1:1" else ""
+    ratio_text = f"{orientation} {ratio}".strip()
+    return f"Generate exactly {int(duration)} seconds {ratio_text} video. {prompt}"
 
 
 def build_chain_poll_body(conversation_id: str, conversation_type: int) -> dict[str, Any]:
@@ -628,6 +680,7 @@ def is_assistant_log_message(text: str) -> bool:
     lowered = text.lower()
     blocked_fragments = (
         "generate video:",
+        "generate exactly ",
         "conversation_id",
         "conversation_type",
         "local_message_id",

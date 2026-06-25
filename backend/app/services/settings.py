@@ -49,11 +49,12 @@ def load_public_settings(session: Session) -> dict[str, Any]:
         "gemini_base_url": settings.gemini_base_url,
         "gemini_model": settings.gemini_model,
         "default_ratio": "9:16",
-        "default_duration": 15,
+        "default_duration": 10,
         "default_parallel": 5,
         "output_dir": str(settings.output_dir),
         "proxy_enabled": False,
         "proxy_url": "",
         "tts_default_voice": settings.tts_default_voice,
+        "dola_mode": settings.dola_mode if settings.dola_mode in {"direct", "browser", "hybrid"} else "hybrid",
     }
     return {**defaults, **get_setting(session, "app_settings", {})}
