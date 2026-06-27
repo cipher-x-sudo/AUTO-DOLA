@@ -28,8 +28,9 @@ from app.services.dola_browser import DolaBrowserClient, DolaBrowserError, forma
 from app.services.images import generate_image
 from app.services.jobs import add_artifact, log, mark_item, recompute_job
 from app.services.media import clean_video, safe_filename
-from app.services.settings import load_public_settings
+from app.services.settings import load_app_settings
 from app.services.tts import synthesize
+from app.services.vpn import choose_vpn_config, choose_vpn_username, vpn_config_path
 
 logger = logging.getLogger(__name__)
 MAX_DOLA_PARALLEL = 50
@@ -92,11 +93,12 @@ async def _process_job(job_id: UUID) -> None:
 
 
 async def process_video(session: Session, job: Job) -> None:
-    app_settings = load_public_settings(session)
+    app_settings = load_app_settings(session, include_secrets=True)
     config = job.config_json
     output_dir = Path(config.get("save_folder") or app_settings.get("output_dir") or settings.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    proxy_url = app_settings.get("proxy_url", "") if app_settings.get("proxy_enabled") else ""
+    vpn_enabled = bool(app_settings.get("vpn_enabled"))
+    proxy_url = app_settings.get("proxy_url", "") if app_settings.get("proxy_enabled") and not vpn_enabled else ""
     dola_mode = str(app_settings.get("dola_mode") or settings.dola_mode or "hybrid").lower()
     if dola_mode not in {"direct", "browser", "hybrid"}:
         dola_mode = "hybrid"
@@ -111,10 +113,10 @@ async def process_video(session: Session, job: Job) -> None:
     parallel = effective_video_parallel(requested_parallel)
     log(session, f"Video concurrency requested: {requested_parallel}", "info", job.id)
     log(session, f"Video concurrency effective: {parallel}", "info", job.id)
-    log(session, f"Video settings: duration={requested_duration}, ratio={config.get('ratio', '9:16')}, mode={effective_dola_mode}, submit_proxy_enabled={bool(proxy_url)}, polling_proxy_enabled=False", "info", job.id)
+    log(session, f"Video settings: duration={requested_duration}, ratio={config.get('ratio', '9:16')}, mode={effective_dola_mode}, submit_proxy_enabled={bool(proxy_url)}, vpn_enabled={vpn_enabled}, polling_proxy_enabled=False", "info", job.id)
     max_retries = max(int(config.get("max_retries", 3)), HIGH_DEMAND_MIN_RETRIES)
     semaphore = asyncio.Semaphore(parallel)
-    browser_submit_semaphore = asyncio.Semaphore(min(BROWSER_SUBMIT_PARALLEL, parallel))
+    browser_submit_semaphore = asyncio.Semaphore(1 if vpn_enabled else min(BROWSER_SUBMIT_PARALLEL, parallel))
 
     def ensure_not_cancelled(session_local: Session, item_id: UUID | None = None) -> JobItem | None:
         current_job = session_local.get(Job, job.id)
@@ -205,6 +207,7 @@ async def process_video(session: Session, job: Job) -> None:
                     browser_profile_dir = ""
                     browser_profile_retained = False
                     browser_completed = False
+                    vpn_connected = False
 
                     async def cleanup_browser_slot(reason: str, *, delete_profile: bool = True) -> None:
                         nonlocal browser_slot_id, browser_profile_retained
@@ -251,12 +254,45 @@ async def process_video(session: Session, job: Job) -> None:
                         item_log(f"Dola browser: {message}", level)
 
                     async with browser_submit_semaphore:
-                        browser_result = await browser_client.submit_and_capture_session(
-                            db_item.prompt,
-                            int(config.get("duration", 10)),
-                            str(config.get("ratio", "9:16")),
-                            log_fn=browser_submit_log,
-                        )
+                        if vpn_enabled:
+                            if not app_settings.get("vpn_password"):
+                                raise DolaBrowserError("OpenVPN password is missing.", {"error_type": "VPN_AUTH_FAILED"}, "VPN_AUTH_FAILED")
+                            try:
+                                vpn_config = choose_vpn_config()
+                                vpn_username = choose_vpn_username(str(app_settings.get("vpn_usernames") or ""))
+                            except ValueError as exc:
+                                raise DolaBrowserError(str(exc), {"error_type": str(exc)}, str(exc)) from exc
+                            item_log(f"Connecting OpenVPN: config={vpn_config['name']}", "info")
+                            vpn_status = await browser_client.vpn_connect(
+                                config_path=str(vpn_config_path(vpn_config["name"])),
+                                config_name=str(vpn_config["name"]),
+                                username=vpn_username,
+                                password=str(app_settings.get("vpn_password") or ""),
+                            )
+                            vpn_connected = True
+                            item_log(f"VPN connected: config={vpn_status.get('config_name')}, user={vpn_status.get('username_masked')}, ip={vpn_status.get('ip')}", "success")
+                        try:
+                            browser_result = await browser_client.submit_and_capture_session(
+                                db_item.prompt,
+                                int(config.get("duration", 10)),
+                                str(config.get("ratio", "9:16")),
+                                log_fn=browser_submit_log,
+                            )
+                        except DolaBrowserError as exc:
+                            if vpn_enabled:
+                                exc.error_type = "DOLA_SUBMIT_FAILED_AFTER_VPN"
+                                exc.diagnostic["error_type"] = "DOLA_SUBMIT_FAILED_AFTER_VPN"
+                                if vpn_connected:
+                                    await browser_client.vpn_disconnect()
+                                    vpn_connected = False
+                                    item_log("OpenVPN disconnected", "success")
+                            raise
+                        except Exception:
+                            if vpn_enabled and vpn_connected:
+                                await browser_client.vpn_disconnect()
+                                vpn_connected = False
+                                item_log("OpenVPN disconnected", "success")
+                            raise
                     browser_slot_id = browser_result.slot_id
                     browser_profile_dir = str(browser_result.diagnostic.get("profile_dir") or "")
                     conversation_hint = browser_result.conversation_id[-8:] if len(browser_result.conversation_id) > 8 else browser_result.conversation_id
@@ -275,7 +311,8 @@ async def process_video(session: Session, job: Job) -> None:
                                 "slot_id": browser_slot_id,
                                 "profile_dir": browser_profile_dir,
                                 "cdp_port": browser_result.diagnostic.get("cdp_port"),
-                                "profile_retained": True,
+                                "profile_retained": not vpn_enabled,
+                                "vpn_enabled": vpn_enabled,
                                 "requested_duration": browser_result.diagnostic.get("requested_duration"),
                                 "visible_duration": browser_result.diagnostic.get("visible_duration"),
                                 "captured_duration": browser_result.diagnostic.get("captured_duration"),
@@ -294,15 +331,20 @@ async def process_video(session: Session, job: Job) -> None:
                         item_log(f"Browser session saved: chat_url={browser_result.chat_url}, cookie_snapshot_id={browser_snapshot['snapshot_id']}", "success")
                         item_log("Captured browser session. Closing browser and switching to direct HTTP poll/download.", "info")
                         item_log(format_browser_diagnostic(browser_result.diagnostic), "info")
-                        await cleanup_browser_slot("submit", delete_profile=False)
-                        item_log("Profile retained for fallback", "info")
+                        await cleanup_browser_slot("submit", delete_profile=vpn_enabled)
+                        if vpn_enabled:
+                            if await browser_client.vpn_disconnect():
+                                item_log("OpenVPN disconnected", "success")
+                            vpn_connected = False
+                        else:
+                            item_log("Profile retained for fallback", "info")
                         mark_item(session_local, db_item, ItemStatus.running, f"{action_prefix}Polling video id 1/{VIDEO_POLL_ATTEMPTS}")
                         item_log("Polling direct HTTP 1/250", "info")
                         item_log("Polling video id with browser session over direct HTTP (proxy disabled).", "info")
 
                         async def run_browser_download_fallback(reason: str) -> bool:
                             nonlocal browser_completed, browser_profile_retained
-                            if not browser_profile_dir:
+                            if vpn_enabled or not browser_profile_dir:
                                 return False
                             item_log(f"Direct polling failed, reopening saved browser profile: {reason}", "warn")
                             mark_item(session_local, db_item, ItemStatus.running, f"{action_prefix}Reopening saved browser profile")
@@ -372,6 +414,9 @@ async def process_video(session: Session, job: Job) -> None:
                     finally:
                         await cleanup_browser_slot("success" if browser_completed else "rejection", delete_profile=True)
                         await cleanup_retained_profile()
+                        if vpn_connected:
+                            if await browser_client.vpn_disconnect():
+                                item_log("OpenVPN disconnected", "success")
 
                 for attempt in range(1, max_retries + 1):
                     last_diagnostic = {}

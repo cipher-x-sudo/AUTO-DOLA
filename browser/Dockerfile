@@ -11,7 +11,9 @@ RUN apt-get update \
         fluxbox \
         netcat-openbsd \
         novnc \
+        openvpn \
         procps \
+        iproute2 \
         python3-websockify \
         socat \
         x11vnc \

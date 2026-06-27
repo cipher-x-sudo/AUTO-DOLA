@@ -178,3 +178,28 @@ def test_connection_slot_keeps_credentials_for_internal_cdp_handoff() -> None:
     assert connection["proxy_username"] == "user"
     assert connection["proxy_password"] == "secret"
     assert "process" not in connection
+
+
+def test_validate_vpn_config_path_rejects_outside_path(tmp_path: Path) -> None:
+    manager = load_browser_manager()
+    manager.VPN_DIR = tmp_path / "vpn"
+    manager.VPN_DIR.mkdir()
+    outside = tmp_path / "outside.ovpn"
+    outside.write_text("client", encoding="utf-8")
+
+    try:
+        manager.validate_vpn_config_path(str(outside))
+    except RuntimeError as exc:
+        assert "outside VPN config directory" in str(exc)
+    else:
+        raise AssertionError("outside VPN path accepted")
+
+
+def test_validate_vpn_config_path_accepts_ovpn_under_vpn_dir(tmp_path: Path) -> None:
+    manager = load_browser_manager()
+    manager.VPN_DIR = tmp_path / "vpn"
+    manager.VPN_DIR.mkdir()
+    config = manager.VPN_DIR / "hk.ovpn"
+    config.write_text("client", encoding="utf-8")
+
+    assert manager.validate_vpn_config_path(str(config)) == config.resolve()

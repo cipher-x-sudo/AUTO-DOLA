@@ -21,6 +21,18 @@ export const api = {
   settings: () => request<SettingsPayload>("/api/settings"),
   saveSettings: (payload: SettingsPayload) => request<SettingsPayload>("/api/settings", { method: "PUT", body: JSON.stringify(payload) }),
   testProxy: (proxy_url: string) => request<{ ok: boolean; ip?: string; message: string }>("/api/proxy/test", { method: "POST", body: JSON.stringify({ proxy_url }) }),
+  vpnConfigs: () => request<{ configs: Array<{ name: string; size_bytes: number }> }>("/api/vpn/configs"),
+  uploadVpnConfig: (file: File) => {
+    const form = new FormData()
+    form.append("file", file)
+    return fetch(`${API_BASE}/api/vpn/configs`, { method: "POST", body: form }).then(async (res) => {
+      if (!res.ok) throw new Error(await res.text())
+      return res.json() as Promise<{ ok: boolean; config: { name: string; size_bytes: number } }>
+    })
+  },
+  deleteVpnConfig: (name: string) => request<{ ok: boolean; deleted: boolean }>(`/api/vpn/configs/${encodeURIComponent(name)}`, { method: "DELETE" }),
+  vpnStatus: () => request<{ ok: boolean; connected: boolean; config_name?: string; username_masked?: string; ip?: string; error?: string }>("/api/vpn/status"),
+  testVpn: (config_name = "") => request<{ ok: boolean; connected: boolean; config_name?: string; username_masked?: string; ip?: string; ip_before?: string }>("/api/vpn/test", { method: "POST", body: JSON.stringify({ config_name }) }),
   ffmpeg: () => request<{ available: boolean; path: string }>("/api/system/ffmpeg"),
   chrome: () => request<{ available: boolean; path: string }>("/api/system/chrome"),
   dolaBrowser: () => request<DolaBrowserStatus>("/api/system/dola-browser"),

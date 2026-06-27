@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react"
 import {
   Check,
   Copy,
@@ -54,6 +54,10 @@ const emptySettings: SettingsPayload = {
   output_dir: "",
   proxy_enabled: false,
   proxy_url: "",
+  vpn_enabled: false,
+  vpn_usernames: "",
+  vpn_password: "",
+  vpn_password_saved: false,
   tts_default_voice: "en-US-AriaNeural",
   dola_mode: "hybrid",
 }
@@ -232,10 +236,17 @@ function VideoConsole({
   const [saveMode, setSaveMode] = useState("final")
   const [proxyEnabled, setProxyEnabled] = useState(settings.proxy_enabled)
   const [proxyUrl, setProxyUrl] = useState(settings.proxy_url || "")
+  const [vpnEnabled, setVpnEnabled] = useState(settings.vpn_enabled)
+  const [vpnUsernames, setVpnUsernames] = useState(settings.vpn_usernames || "")
+  const [vpnPassword, setVpnPassword] = useState("")
+  const [vpnConfigs, setVpnConfigs] = useState<Array<{ name: string; size_bytes: number }>>([])
+  const [vpnStatus, setVpnStatus] = useState<{ connected: boolean; config_name?: string; username_masked?: string; ip?: string } | null>(null)
   const [savingProxy, setSavingProxy] = useState(false)
   const [testingProxy, setTestingProxy] = useState(false)
+  const [testingVpn, setTestingVpn] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [logSearch, setLogSearch] = useState("")
+  const vpnFileRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
     setRatio((current) => current || settings.default_ratio || "9:16")
@@ -243,7 +254,14 @@ function VideoConsole({
     setParallel((current) => current || settings.default_parallel || 30)
     setProxyEnabled(settings.proxy_enabled)
     setProxyUrl(settings.proxy_url || "")
+    setVpnEnabled(settings.vpn_enabled)
+    setVpnUsernames(settings.vpn_usernames || "")
+    setVpnPassword("")
   }, [settings])
+
+  useEffect(() => {
+    refreshVpn()
+  }, [])
 
   const stats = useMemo(() => {
     const items = jobs.flatMap((job) => job.items)
@@ -310,13 +328,67 @@ function VideoConsole({
   async function saveProxySettings() {
     setSavingProxy(true)
     try {
-      const saved = await api.saveSettings({ ...settings, proxy_enabled: proxyEnabled, proxy_url: proxyUrl })
+      const saved = await api.saveSettings({
+        ...settings,
+        proxy_enabled: proxyEnabled && !vpnEnabled,
+        proxy_url: proxyUrl,
+        vpn_enabled: vpnEnabled,
+        vpn_usernames: vpnUsernames,
+        vpn_password: vpnPassword,
+      })
       onSettingsSaved(saved)
-      toast.success("Proxy settings saved")
+      toast.success("Network settings saved")
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Failed to save proxy settings")
+      toast.error(error instanceof Error ? error.message : "Failed to save network settings")
     } finally {
       setSavingProxy(false)
+    }
+  }
+
+  async function refreshVpn() {
+    try {
+      const [configs, status] = await Promise.all([api.vpnConfigs(), api.vpnStatus()])
+      setVpnConfigs(configs.configs)
+      setVpnStatus({ connected: status.connected, config_name: status.config_name, username_masked: status.username_masked, ip: status.ip })
+    } catch {
+      setVpnStatus(null)
+    }
+  }
+
+  async function uploadVpnFiles(files: FileList | null) {
+    if (!files?.length) return
+    try {
+      for (const file of Array.from(files)) {
+        await api.uploadVpnConfig(file)
+      }
+      toast.success("VPN configs uploaded")
+      refreshVpn()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "VPN upload failed")
+    }
+  }
+
+  async function deleteVpnConfig(name: string) {
+    try {
+      await api.deleteVpnConfig(name)
+      toast.success("VPN config deleted")
+      refreshVpn()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "VPN delete failed")
+    }
+  }
+
+  async function testVpn() {
+    setTestingVpn(true)
+    try {
+      await api.saveSettings({ ...settings, vpn_enabled: vpnEnabled, vpn_usernames: vpnUsernames, vpn_password: vpnPassword })
+      const result = await api.testVpn()
+      toast.success(result.ip ? `VPN reachable: ${result.ip}` : "VPN reachable")
+      refreshVpn()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "VPN test failed")
+    } finally {
+      setTestingVpn(false)
     }
   }
 
@@ -378,6 +450,16 @@ function VideoConsole({
             setProxyEnabled={setProxyEnabled}
             proxyUrl={proxyUrl}
             setProxyUrl={setProxyUrl}
+            vpnEnabled={vpnEnabled}
+            setVpnEnabled={setVpnEnabled}
+            vpnUsernames={vpnUsernames}
+            setVpnUsernames={setVpnUsernames}
+            vpnPassword={vpnPassword}
+            setVpnPassword={setVpnPassword}
+            vpnConfigs={vpnConfigs}
+            vpnStatus={vpnStatus}
+            vpnFileRef={vpnFileRef}
+            testingVpn={testingVpn}
             savingProxy={savingProxy}
             testingProxy={testingProxy}
             settings={settings}
@@ -386,6 +468,10 @@ function VideoConsole({
             hasActiveJob={!!activeJob && ["queued", "running"].includes(activeJob.status)}
             onSaveProxy={saveProxySettings}
             onTestProxy={testProxy}
+            onUploadVpnFiles={uploadVpnFiles}
+            onDeleteVpnConfig={deleteVpnConfig}
+            onTestVpn={testVpn}
+            onRefreshVpn={refreshVpn}
             onStart={submit}
             onStop={stopGeneration}
           />
@@ -443,6 +529,16 @@ function GenerationSettings({
   setProxyEnabled,
   proxyUrl,
   setProxyUrl,
+  vpnEnabled,
+  setVpnEnabled,
+  vpnUsernames,
+  setVpnUsernames,
+  vpnPassword,
+  setVpnPassword,
+  vpnConfigs,
+  vpnStatus,
+  vpnFileRef,
+  testingVpn,
   savingProxy,
   testingProxy,
   settings,
@@ -451,6 +547,10 @@ function GenerationSettings({
   hasActiveJob,
   onSaveProxy,
   onTestProxy,
+  onUploadVpnFiles,
+  onDeleteVpnConfig,
+  onTestVpn,
+  onRefreshVpn,
   onStart,
   onStop,
 }: {
@@ -468,6 +568,16 @@ function GenerationSettings({
   setProxyEnabled: (value: boolean) => void
   proxyUrl: string
   setProxyUrl: (value: string) => void
+  vpnEnabled: boolean
+  setVpnEnabled: (value: boolean) => void
+  vpnUsernames: string
+  setVpnUsernames: (value: string) => void
+  vpnPassword: string
+  setVpnPassword: (value: string) => void
+  vpnConfigs: Array<{ name: string; size_bytes: number }>
+  vpnStatus: { connected: boolean; config_name?: string; username_masked?: string; ip?: string } | null
+  vpnFileRef: RefObject<HTMLInputElement>
+  testingVpn: boolean
   savingProxy: boolean
   testingProxy: boolean
   settings: SettingsPayload
@@ -476,6 +586,10 @@ function GenerationSettings({
   hasActiveJob: boolean
   onSaveProxy: () => void
   onTestProxy: () => void
+  onUploadVpnFiles: (files: FileList | null) => void
+  onDeleteVpnConfig: (name: string) => void
+  onTestVpn: () => void
+  onRefreshVpn: () => void
   onStart: () => void
   onStop: () => void
 }) {
@@ -535,6 +649,47 @@ function GenerationSettings({
             Save Proxy
           </Button>
         </div>
+        <label className="flex min-h-10 items-center gap-3 rounded-md border border-border bg-background px-3 text-xs font-black uppercase tracking-wide text-muted-foreground sm:col-span-2">
+          <input type="checkbox" checked={vpnEnabled} onChange={(event) => setVpnEnabled(event.target.checked)} className="h-4 w-4 accent-[hsl(var(--primary))]" />
+          Use OpenVPN for Dola browser submit
+        </label>
+        <Field label="VPN usernames" className="sm:col-span-2">
+          <Textarea value={vpnUsernames} onChange={(event) => setVpnUsernames(event.target.value)} placeholder="One username per line" rows={3} />
+        </Field>
+        <Field label={settings.vpn_password_saved ? "VPN shared password (saved)" : "VPN shared password"} className="sm:col-span-2">
+          <Input type="password" value={vpnPassword} onChange={(event) => setVpnPassword(event.target.value)} placeholder={settings.vpn_password_saved ? "Leave blank to keep saved password" : "Shared VPN password"} />
+        </Field>
+        <div className="grid gap-2 sm:col-span-2">
+          <input ref={vpnFileRef} type="file" accept=".ovpn" multiple className="hidden" onChange={(event) => onUploadVpnFiles(event.target.files)} />
+          <div className="grid grid-cols-3 gap-2">
+            <Button variant="secondary" onClick={() => vpnFileRef.current?.click()}>
+              <Upload size={16} />
+              Upload .ovpn
+            </Button>
+            <Button variant="secondary" onClick={onTestVpn} disabled={testingVpn || !vpnUsernames.trim()}>
+              {testingVpn ? <Loader2 className="animate-spin" size={16} /> : <Zap size={16} />}
+              Test VPN
+            </Button>
+            <Button variant="secondary" onClick={onRefreshVpn}>
+              <Settings2 size={16} />
+              Refresh VPN
+            </Button>
+          </div>
+          <div className="rounded-md border border-border bg-background p-3 text-[11px] font-semibold text-muted-foreground">
+            <div className="truncate">
+              VPN: {vpnEnabled ? "enabled" : "disabled"} {vpnStatus?.connected ? `- connected ${vpnStatus.config_name || ""} ${vpnStatus.ip || ""}` : "- disconnected"}
+            </div>
+            <div className="mt-2 flex flex-wrap gap-2">
+              {vpnConfigs.length ? vpnConfigs.map((config) => (
+                <span key={config.name} className="inline-flex max-w-full items-center gap-2 rounded-md bg-muted px-2 py-1">
+                  <span className="truncate">{config.name}</span>
+                  <button type="button" onClick={() => onDeleteVpnConfig(config.name)} className="text-red-300 hover:text-red-200">delete</button>
+                </span>
+              )) : <span>No .ovpn configs uploaded</span>}
+            </div>
+            {vpnEnabled && proxyEnabled && <div className="mt-2 text-yellow-300">VPN active: browser proxy will be skipped.</div>}
+          </div>
+        </div>
         <div className="rounded-md border border-border bg-background p-3 sm:col-span-2">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div className="min-w-0">
@@ -548,6 +703,9 @@ function GenerationSettings({
                 {browserStatus?.browser_ip ? ` - IP ${browserStatus.browser_ip}` : ""}
                 {typeof browserStatus?.active_browser_count === "number" ? ` - active ${browserStatus.active_browser_count}/${browserStatus.max_browser_slots || 0}` : ""}
                 {browserStatus?.active_cdp_ports?.length ? ` - ports ${browserStatus.active_cdp_ports.join(",")}` : ""}
+              </div>
+              <div className="mt-1 truncate text-[11px] font-semibold text-muted-foreground">
+                Browser VPN: {browserStatus?.browser_vpn_active ? `active ${browserStatus.browser_vpn_config || ""} ${browserStatus.browser_vpn_ip || ""}` : "inactive"}
               </div>
               {(browserStatus?.last_submit_endpoint || browserStatus?.last_dola_error) && (
                 <div className="mt-1 truncate text-[11px] font-semibold text-muted-foreground">

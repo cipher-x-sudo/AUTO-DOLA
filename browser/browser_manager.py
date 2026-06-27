@@ -9,6 +9,8 @@ import socket
 import subprocess
 import threading
 import time
+import tempfile
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlparse
@@ -17,6 +19,7 @@ from urllib.parse import unquote, urlparse
 DISPLAY = os.environ.get("DISPLAY", ":99")
 BASE_PROFILE_DIR = Path(os.environ.get("CHROME_PROFILE_DIR", "/data/browser-profile"))
 LOG_DIR = Path("/data/logs")
+VPN_DIR = Path(os.environ.get("VPN_CONFIG_DIR", "/data/profiles/vpn"))
 PORT_START = int(os.environ.get("BROWSER_SLOT_PORT_START", "9300"))
 PORT_END = int(os.environ.get("BROWSER_SLOT_PORT_END", "9399"))
 EXTERNAL_PORT_START = int(os.environ.get("BROWSER_SLOT_EXTERNAL_PORT_START", "10300"))
@@ -25,6 +28,16 @@ WINDOW_HEIGHT = 900
 
 LOCK = threading.Lock()
 SLOTS: dict[str, dict] = {}
+VPN_STATE: dict[str, object] = {
+    "connected": False,
+    "process": None,
+    "auth_file": "",
+    "config_name": "",
+    "username_masked": "",
+    "ip": "",
+    "connected_at": 0,
+    "log_file": None,
+}
 
 
 def json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict) -> None:
@@ -102,6 +115,135 @@ def wait_for_port(port: int, timeout: float = 20.0, host: str = "127.0.0.1") -> 
                 return
         time.sleep(0.2)
     raise RuntimeError(f"Browser CDP port {port} did not open.")
+
+
+def current_ip(timeout: float = 15.0) -> str:
+    try:
+        with urllib.request.urlopen("https://api.ipify.org", timeout=timeout) as response:
+            return response.read().decode().strip()
+    except Exception:
+        return ""
+
+
+def validate_vpn_config_path(config_path: str) -> Path:
+    path = Path(config_path).resolve()
+    base = VPN_DIR.resolve()
+    if base not in path.parents or path.suffix.lower() != ".ovpn":
+        raise RuntimeError("VPN config path is outside VPN config directory.")
+    if not path.exists():
+        raise RuntimeError("VPN_CONFIG_MISSING")
+    return path
+
+
+def mask_username(username: str) -> str:
+    if len(username) <= 3:
+        return "***"
+    return f"{username[:2]}***{username[-1:]}"
+
+
+def vpn_status() -> dict:
+    process: subprocess.Popen | None = VPN_STATE.get("process")  # type: ignore[assignment]
+    connected = bool(process and process.poll() is None and VPN_STATE.get("connected"))
+    return {
+        "ok": True,
+        "connected": connected,
+        "config_name": VPN_STATE.get("config_name") if connected else "",
+        "username_masked": VPN_STATE.get("username_masked") if connected else "",
+        "ip": VPN_STATE.get("ip") if connected else "",
+        "connected_at": VPN_STATE.get("connected_at") if connected else 0,
+    }
+
+
+def disconnect_vpn() -> bool:
+    process: subprocess.Popen | None = VPN_STATE.get("process")  # type: ignore[assignment]
+    if process and process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+    auth_file = str(VPN_STATE.get("auth_file") or "")
+    if auth_file:
+        Path(auth_file).unlink(missing_ok=True)
+    log_file = VPN_STATE.get("log_file")
+    try:
+        if log_file:
+            log_file.close()  # type: ignore[attr-defined]
+    except Exception:
+        pass
+    VPN_STATE.update(
+        {
+            "connected": False,
+            "process": None,
+            "auth_file": "",
+            "config_name": "",
+            "username_masked": "",
+            "ip": "",
+            "connected_at": 0,
+            "log_file": None,
+        }
+    )
+    return True
+
+
+def connect_vpn(config_path: str, config_name: str, username: str, password: str, timeout: float = 90.0) -> dict:
+    if not Path("/dev/net/tun").exists():
+        raise RuntimeError("VPN_NO_TUN_DEVICE")
+    if not username or not password:
+        raise RuntimeError("VPN_AUTH_FAILED")
+    disconnect_vpn()
+    config = validate_vpn_config_path(config_path)
+    before_ip = current_ip(timeout=10)
+    auth_handle = tempfile.NamedTemporaryFile("w", delete=False, prefix="openvpn-auth-", dir="/tmp", encoding="utf-8")
+    auth_handle.write(f"{username}\n{password}\n")
+    auth_handle.close()
+    log_path = LOG_DIR / f"openvpn-{int(time.time() * 1000)}.log"
+    log_file = log_path.open("ab")
+    process = subprocess.Popen(
+        ["openvpn", "--config", str(config), "--auth-user-pass", auth_handle.name, "--verb", "3"],
+        stdout=log_file,
+        stderr=log_file,
+        env=os.environ.copy(),
+    )
+    VPN_STATE.update(
+        {
+            "connected": False,
+            "process": process,
+            "auth_file": auth_handle.name,
+            "config_name": config_name or config.name,
+            "username_masked": mask_username(username),
+            "ip": "",
+            "connected_at": 0,
+            "log_file": log_file,
+        }
+    )
+    deadline = time.monotonic() + timeout
+    last_log = ""
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            disconnect_vpn()
+            raise RuntimeError("VPN_AUTH_FAILED")
+        try:
+            last_log = log_path.read_text(errors="ignore")[-4000:]
+        except Exception:
+            last_log = ""
+        if "Initialization Sequence Completed" in last_log:
+            after_ip = current_ip(timeout=15)
+            VPN_STATE.update({"connected": True, "ip": after_ip, "connected_at": time.time()})
+            return {
+                "ok": True,
+                "connected": True,
+                "config_name": config_name or config.name,
+                "username_masked": mask_username(username),
+                "ip_before": before_ip,
+                "ip": after_ip,
+            }
+        if "AUTH_FAILED" in last_log or "auth-failure" in last_log.lower():
+            disconnect_vpn()
+            raise RuntimeError("VPN_AUTH_FAILED")
+        time.sleep(1)
+    disconnect_vpn()
+    raise RuntimeError("VPN_CONNECT_TIMEOUT")
 
 
 def validate_profile_dir(profile_dir: str) -> Path:
@@ -246,6 +388,9 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/status":
             json_response(self, 200, status())
             return
+        if self.path == "/vpn/status":
+            json_response(self, 200, vpn_status())
+            return
         json_response(self, 404, {"ok": False, "error": "Not found"})
 
     def do_POST(self) -> None:
@@ -273,6 +418,33 @@ class Handler(BaseHTTPRequestHandler):
                 profile_dir = str(payload.get("profile_dir") or "")
                 json_response(self, 200, {"ok": True, "deleted": delete_profile(profile_dir)})
                 return
+            if self.path == "/vpn/connect":
+                result = connect_vpn(
+                    str(payload.get("config_path") or ""),
+                    str(payload.get("config_name") or ""),
+                    str(payload.get("username") or ""),
+                    str(payload.get("password") or ""),
+                )
+                json_response(self, 200, result)
+                return
+            if self.path == "/vpn/disconnect":
+                json_response(self, 200, {"ok": True, "disconnected": disconnect_vpn()})
+                return
+            if self.path == "/vpn/status":
+                json_response(self, 200, vpn_status())
+                return
+            if self.path == "/vpn/test-ip":
+                result = connect_vpn(
+                    str(payload.get("config_path") or ""),
+                    str(payload.get("config_name") or ""),
+                    str(payload.get("username") or ""),
+                    str(payload.get("password") or ""),
+                )
+                try:
+                    json_response(self, 200, result)
+                finally:
+                    disconnect_vpn()
+                return
             json_response(self, 404, {"ok": False, "error": "Not found"})
         except Exception as exc:
             json_response(self, 500, {"ok": False, "error": str(exc)})
@@ -282,6 +454,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def shutdown(*_args: object) -> None:
+    disconnect_vpn()
     for slot_id in list(SLOTS):
         close_slot(slot_id)
     raise SystemExit(0)

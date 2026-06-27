@@ -277,6 +277,33 @@ class DolaBrowserClient:
         except Exception:
             return False
 
+    async def vpn_connect(self, *, config_path: str, config_name: str, username: str, password: str) -> dict[str, Any]:
+        async with httpx.AsyncClient(timeout=180) as client:
+            response = await client.post(
+                f"{resolve_cdp_url(self.manager_url).rstrip('/')}/vpn/connect",
+                json={
+                    "config_path": config_path,
+                    "config_name": config_name,
+                    "username": username,
+                    "password": password,
+                },
+            )
+            response.raise_for_status()
+            payload = response.json()
+        if not payload.get("ok"):
+            raise DolaBrowserError(f"OpenVPN failed: {payload.get('error')}", {"cdp": False, "error_msg": payload.get("error")}, str(payload.get("error") or "VPN_CONNECT_FAILED"))
+        return payload
+
+    async def vpn_disconnect(self) -> bool:
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.post(f"{resolve_cdp_url(self.manager_url).rstrip('/')}/vpn/disconnect", json={})
+                response.raise_for_status()
+                payload = response.json()
+                return bool(payload.get("disconnected"))
+        except Exception:
+            return False
+
     async def _slot_context(self, slot_id: str) -> BrowserContext:
         runtime = self._active_slots.get(slot_id)
         if not runtime:
@@ -301,7 +328,9 @@ class DolaBrowserClient:
                 manager_url = resolve_cdp_url(self.manager_url).rstrip("/")
                 status_response = await client.get(f"{manager_url}/status")
                 status_response.raise_for_status()
+                vpn_response = await client.get(f"{manager_url}/vpn/status")
             manager_status = status_response.json()
+            vpn_status = vpn_response.json() if vpn_response.status_code == 200 else {}
             browser_ip = ""
             return {
                 "ok": True,
@@ -312,6 +341,9 @@ class DolaBrowserClient:
                 "mode": settings.dola_mode,
                 "browser_proxy_active": bool(self.proxy_url),
                 "browser_proxy_host": proxy_public_host(self.proxy_url),
+                "browser_vpn_active": bool(vpn_status.get("connected")),
+                "browser_vpn_config": str(vpn_status.get("config_name") or ""),
+                "browser_vpn_ip": str(vpn_status.get("ip") or ""),
                 "browser_ip": browser_ip,
                 "page_count": manager_status.get("active_browser_count", 0),
                 "active_browser_count": manager_status.get("active_browser_count", 0),
@@ -331,6 +363,9 @@ class DolaBrowserClient:
                 "error": str(exc),
                 "browser_proxy_active": bool(self.proxy_url),
                 "browser_proxy_host": proxy_public_host(self.proxy_url),
+                "browser_vpn_active": False,
+                "browser_vpn_config": "",
+                "browser_vpn_ip": "",
                 "browser_ip": "",
                 "page_count": 0,
                 "last_submit_endpoint": "",

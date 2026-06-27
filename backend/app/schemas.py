@@ -82,12 +82,20 @@ class SettingsPayload(BaseModel):
     output_dir: str = ""
     proxy_enabled: bool = False
     proxy_url: str = ""
+    vpn_enabled: bool = False
+    vpn_usernames: str = ""
+    vpn_password: str = ""
+    vpn_password_saved: bool = False
     tts_default_voice: str = "en-US-AriaNeural"
     dola_mode: Literal["direct", "browser", "hybrid"] = "hybrid"
 
 
 class ProxyTestRequest(BaseModel):
     proxy_url: str
+
+
+class VpnTestRequest(BaseModel):
+    config_name: str = ""
 
 
 class PromptGenerateRequest(BaseModel):

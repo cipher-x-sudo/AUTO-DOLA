@@ -23,12 +23,17 @@ services:
     build:
       context: ./browser
     shm_size: "1gb"
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
     ports:
       - "6080:6080"
       - "5900:5900"
       - "9222:7070"
     volumes:
       - auto_dola_browser_profile:/data/browser-profile
+      - auto_dola_profiles:/data/profiles
       - auto_dola_logs:/data/logs
 
   api:
