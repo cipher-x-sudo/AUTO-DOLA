@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 import shutil
 from pathlib import Path
@@ -203,17 +202,33 @@ async def process_video(session: Session, job: Job) -> None:
                     mark_item(session_local, db_item, ItemStatus.running, f"{action_prefix}Submitting through Dola browser")
                     item_log("Connected to Dola browser fallback.", "info")
                     browser_slot_id = ""
+                    browser_profile_dir = ""
+                    browser_profile_retained = False
                     browser_completed = False
 
-                    async def cleanup_browser_slot(reason: str) -> None:
+                    async def cleanup_browser_slot(reason: str, *, delete_profile: bool = True) -> None:
+                        nonlocal browser_slot_id, browser_profile_retained
                         if not browser_slot_id:
                             return
                         item_log(f"Closing browser slot after {reason}: {browser_slot_id}", "info")
-                        item_log("Deleting browser profile after rejection" if reason != "success" else "Deleting browser profile after success", "info")
-                        if await browser_client.close_slot(browser_slot_id):
-                            item_log("Browser profile cleaned", "success")
+                        item_log("Deleting browser profile" if delete_profile else "Keeping browser profile for fallback", "info")
+                        if await browser_client.close_slot(browser_slot_id, delete_profile=delete_profile):
+                            item_log("Browser profile deleted" if delete_profile else "Browser submitted and closed", "success")
+                            if not delete_profile:
+                                browser_profile_retained = True
+                            browser_slot_id = ""
                         else:
                             item_log(f"Browser cleanup failed: {browser_slot_id}", "error")
+
+                    async def cleanup_retained_profile() -> None:
+                        nonlocal browser_profile_retained
+                        if not browser_profile_retained or not browser_profile_dir:
+                            return
+                        if await browser_client.delete_profile(browser_profile_dir):
+                            item_log("Browser profile deleted", "success")
+                        else:
+                            item_log(f"Browser profile cleanup failed: {browser_profile_dir}", "warn")
+                        browser_profile_retained = False
 
                     def browser_submit_log(message: str, level: str = "info") -> None:
                         progress_prefixes = (
@@ -243,6 +258,7 @@ async def process_video(session: Session, job: Job) -> None:
                             log_fn=browser_submit_log,
                         )
                     browser_slot_id = browser_result.slot_id
+                    browser_profile_dir = str(browser_result.diagnostic.get("profile_dir") or "")
                     conversation_hint = browser_result.conversation_id[-8:] if len(browser_result.conversation_id) > 8 else browser_result.conversation_id
                     try:
                         item_log(f"Browser submitted Dola prompt: conversation_id=*{conversation_hint}, conversation_type={browser_result.conversation_type}.", "success")
@@ -257,6 +273,9 @@ async def process_video(session: Session, job: Job) -> None:
                             extra_metadata={
                                 "submit_url": browser_result.submit_url,
                                 "slot_id": browser_slot_id,
+                                "profile_dir": browser_profile_dir,
+                                "cdp_port": browser_result.diagnostic.get("cdp_port"),
+                                "profile_retained": True,
                                 "requested_duration": browser_result.diagnostic.get("requested_duration"),
                                 "visible_duration": browser_result.diagnostic.get("visible_duration"),
                                 "captured_duration": browser_result.diagnostic.get("captured_duration"),
@@ -273,100 +292,34 @@ async def process_video(session: Session, job: Job) -> None:
                         )
                         mark_cookie_snapshot_conversation(session_local, job.id, browser_snapshot["snapshot_id"], browser_result.conversation_id, browser_result.conversation_type)
                         item_log(f"Browser session saved: chat_url={browser_result.chat_url}, cookie_snapshot_id={browser_snapshot['snapshot_id']}", "success")
-                        item_log("Captured browser session. Switching to direct HTTP poll/download.", "info")
+                        item_log("Captured browser session. Closing browser and switching to direct HTTP poll/download.", "info")
                         item_log(format_browser_diagnostic(browser_result.diagnostic), "info")
+                        await cleanup_browser_slot("submit", delete_profile=False)
+                        item_log("Profile retained for fallback", "info")
                         mark_item(session_local, db_item, ItemStatus.running, f"{action_prefix}Polling video id 1/{VIDEO_POLL_ATTEMPTS}")
+                        item_log("Polling direct HTTP 1/250", "info")
                         item_log("Polling video id with browser session over direct HTTP (proxy disabled).", "info")
 
-                        browser_ready_event = asyncio.Event()
+                        async def run_browser_download_fallback(reason: str) -> bool:
+                            nonlocal browser_completed, browser_profile_retained
+                            if not browser_profile_dir:
+                                return False
+                            item_log(f"Direct polling failed, reopening saved browser profile: {reason}", "warn")
+                            mark_item(session_local, db_item, ItemStatus.running, f"{action_prefix}Reopening saved browser profile")
 
-                        def browser_ready_log(message: str, level: str = "info") -> None:
-                            if message.startswith(("Browser says video ready", "Opened ready", "Capturing play_info")):
-                                mark_item(session_local, db_item, ItemStatus.running, f"{action_prefix}{message}")
-                            item_log(f"Dola browser: {message}", level)
+                            def browser_fallback_log(message: str, level: str = "info") -> None:
+                                if message.startswith(("Browser says video ready", "Opened ready", "Capturing play_info")):
+                                    mark_item(session_local, db_item, ItemStatus.running, f"{action_prefix}{message}")
+                                item_log(f"Dola browser fallback: {message}", level)
 
-                        async def poll_http_video_id() -> str | None:
-                            return await poll_client.poll_video_id(
-                                browser_result.session,
-                                browser_result.conversation_id,
-                                browser_result.conversation_type,
-                                max_attempts=VIDEO_POLL_ATTEMPTS,
-                                log_fn=lambda message, level: progress_log()(f"Dola browser session: {message}" if not message.startswith("Polling ") else message, level),
-                                cancel_fn=lambda: job_cancelled_or_missing() or browser_ready_event.is_set(),
+                            browser_download = await browser_client.reopen_profile_and_wait_for_ready_download(
+                                profile_dir=browser_profile_dir,
+                                chat_url=browser_result.chat_url,
+                                conversation_id=browser_result.conversation_id,
+                                log_fn=browser_fallback_log,
+                                timeout_seconds=240,
                             )
-
-                        async def watch_browser_ready_card() -> DolaBrowserDownloadResult:
-                            return await browser_client.wait_for_ready_video_download(
-                                browser_result.conversation_id,
-                                slot_id=browser_result.slot_id,
-                                log_fn=browser_ready_log,
-                                timeout_seconds=(VIDEO_POLL_ATTEMPTS * 5) + 45,
-                                poll_attempt_label=f"video id polling up to {VIDEO_POLL_ATTEMPTS}/{VIDEO_POLL_ATTEMPTS}",
-                            )
-
-                        http_poll_task = asyncio.create_task(poll_http_video_id())
-                        browser_ready_task = asyncio.create_task(watch_browser_ready_card())
-                        browser_ready_error: DolaBrowserError | None = None
-                        vid: str | None = None
-                        browser_download: DolaBrowserDownloadResult | None = None
-
-                        pending: set[asyncio.Task] = {http_poll_task, browser_ready_task}
-                        while pending:
-                            done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
-                            if browser_ready_task in done:
-                                try:
-                                    browser_download = browser_ready_task.result()
-                                    browser_ready_event.set()
-                                    if not http_poll_task.done():
-                                        http_poll_task.cancel()
-                                        with contextlib.suppress(asyncio.CancelledError):
-                                            await http_poll_task
-                                    break
-                                except DolaBrowserError as exc:
-                                    browser_ready_error = exc
-                                    item_log(format_browser_diagnostic(exc.diagnostic), "warn")
-                                    if http_poll_task.done():
-                                        pending.discard(http_poll_task)
-                                    else:
-                                        pending = {http_poll_task}
-                                except Exception as exc:
-                                    browser_ready_error = DolaBrowserError(
-                                        f"Dola browser ready watcher failed: {exc}",
-                                        {"cdp": True, "error_msg": str(exc), "conversation_id": f"*{conversation_hint}"},
-                                    )
-                                    item_log(str(browser_ready_error), "warn")
-                                    if http_poll_task.done():
-                                        pending.discard(http_poll_task)
-                                    else:
-                                        pending = {http_poll_task}
-                            if http_poll_task in done:
-                                vid = http_poll_task.result()
-                                if vid:
-                                    if not browser_ready_task.done():
-                                        browser_ready_task.cancel()
-                                        with contextlib.suppress(asyncio.CancelledError):
-                                            await browser_ready_task
-                                    break
-                                if not browser_ready_task.done():
-                                    item_log("Browser-session HTTP poll did not return video id. Waiting briefly for browser ready card.", "warn")
-                                    try:
-                                        browser_download = await asyncio.wait_for(browser_ready_task, timeout=30)
-                                    except asyncio.TimeoutError:
-                                        browser_ready_task.cancel()
-                                        with contextlib.suppress(asyncio.CancelledError):
-                                            await browser_ready_task
-                                    except DolaBrowserError as exc:
-                                        browser_ready_error = exc
-                                        item_log(format_browser_diagnostic(exc.diagnostic), "warn")
-                                    except Exception as exc:
-                                        browser_ready_error = DolaBrowserError(
-                                            f"Dola browser ready watcher failed: {exc}",
-                                            {"cdp": True, "error_msg": str(exc), "conversation_id": f"*{conversation_hint}"},
-                                        )
-                                        item_log(str(browser_ready_error), "warn")
-                                    break
-
-                        if browser_download:
+                            browser_profile_retained = False
                             update_cookie_snapshot(
                                 session_local,
                                 job.id,
@@ -385,12 +338,22 @@ async def process_video(session: Session, job: Job) -> None:
                                 },
                             )
                             item_log(format_browser_diagnostic(browser_download.diagnostic), "info")
+                            item_log("Browser fallback captured download", "success")
                             await save_video_artifact(browser_download.download_url, browser_download.vid, action_prefix)
                             browser_completed = True
-                            return
+                            return True
+
+                        vid = await poll_client.poll_video_id(
+                            browser_result.session,
+                            browser_result.conversation_id,
+                            browser_result.conversation_type,
+                            max_attempts=VIDEO_POLL_ATTEMPTS,
+                            log_fn=lambda message, level: progress_log()(f"Dola browser session: {message}" if not message.startswith("Polling ") else message, level),
+                            cancel_fn=job_cancelled_or_missing,
+                        )
                         if not vid:
-                            if browser_ready_error:
-                                raise DolaBrowserError("Dola video ready/download URL not captured.", browser_ready_error.diagnostic)
+                            if await run_browser_download_fallback("video id not returned"):
+                                return
                             raise RuntimeError("Dola video ready/download URL not captured.")
                         mark_item(session_local, db_item, ItemStatus.running, f"{action_prefix}Polling play_info 1/200")
                         item_log("Polling play_info with browser session over direct HTTP (proxy disabled).", "info")
@@ -401,11 +364,14 @@ async def process_video(session: Session, job: Job) -> None:
                             log_fn=lambda message, level: progress_log()(f"Dola browser session: {message}" if not message.startswith("Polling ") else message, level),
                         )
                         if not download_url:
+                            if await run_browser_download_fallback("play_info URL not returned"):
+                                return
                             raise RuntimeError("Dola browser session did not return play_info URL.")
                         await save_video_artifact(download_url, vid, action_prefix)
                         browser_completed = True
                     finally:
-                        await cleanup_browser_slot("success" if browser_completed else "rejection")
+                        await cleanup_browser_slot("success" if browser_completed else "rejection", delete_profile=True)
+                        await cleanup_retained_profile()
 
                 for attempt in range(1, max_retries + 1):
                     last_diagnostic = {}

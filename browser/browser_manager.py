@@ -104,17 +104,25 @@ def wait_for_port(port: int, timeout: float = 20.0, host: str = "127.0.0.1") -> 
     raise RuntimeError(f"Browser CDP port {port} did not open.")
 
 
-def launch_slot(proxy_url: str = "") -> dict:
+def validate_profile_dir(profile_dir: str) -> Path:
+    path = Path(profile_dir).resolve()
+    base = (BASE_PROFILE_DIR / "slots").resolve()
+    if base not in path.parents and path != base:
+        raise RuntimeError("Profile path is outside browser profile slots directory.")
+    return path
+
+
+def launch_slot(proxy_url: str = "", profile_dir: str = "") -> dict:
     with LOCK:
         slot_number = len(SLOTS) + 1
         port, external_port = free_port()
         slot_id = f"slot-{int(time.time() * 1000)}-{port}"
-        profile_dir = BASE_PROFILE_DIR / "slots" / slot_id
-        profile_dir.mkdir(parents=True, exist_ok=True)
+        profile_path = validate_profile_dir(profile_dir) if profile_dir else BASE_PROFILE_DIR / "slots" / slot_id
+        profile_path.mkdir(parents=True, exist_ok=True)
         credentials = proxy_credentials(proxy_url)
         x = ((slot_number - 1) % 5) * 40
         y = ((slot_number - 1) % 5) * 35
-        args = browser_launch_args(profile_dir, port, x, y, proxy_url)
+        args = browser_launch_args(profile_path, port, x, y, proxy_url)
         log_file = (LOG_DIR / f"chromium-{slot_id}.log").open("ab")
         process = subprocess.Popen(args, stdout=log_file, stderr=log_file, env={**os.environ, "DISPLAY": DISPLAY})
         try:
@@ -141,7 +149,7 @@ def launch_slot(proxy_url: str = "") -> dict:
             "external_port": external_port,
             "cdp_url": f"http://127.0.0.1:{port}",
             "container_cdp_url": f"http://{container_ip}:{external_port}",
-            "profile_dir": str(profile_dir),
+            "profile_dir": str(profile_path),
             "pid": process.pid,
             "forward_pid": forward_process.pid,
             "proxy_active": bool(proxy_url),
@@ -160,7 +168,7 @@ def launch_slot(proxy_url: str = "") -> dict:
         return connection_slot(slot)
 
 
-def close_slot(slot_id: str) -> bool:
+def close_slot(slot_id: str, delete_profile: bool = True) -> bool:
     with LOCK:
         slot = SLOTS.pop(slot_id, None)
     if not slot:
@@ -187,8 +195,15 @@ def close_slot(slot_id: str) -> bool:
         slot["forward_log"].close()
     except Exception:
         pass
-    shutil.rmtree(slot["profile_dir"], ignore_errors=True)
+    if delete_profile:
+        shutil.rmtree(slot["profile_dir"], ignore_errors=True)
     return True
+
+
+def delete_profile(profile_dir: str) -> bool:
+    path = validate_profile_dir(profile_dir)
+    shutil.rmtree(path, ignore_errors=True)
+    return not path.exists()
 
 
 def public_proxy_host(proxy_url: str) -> str:
@@ -237,11 +252,26 @@ class Handler(BaseHTTPRequestHandler):
         try:
             payload = read_json(self)
             if self.path == "/launch":
-                json_response(self, 200, {"ok": True, "slot": launch_slot(str(payload.get("proxy_url") or ""))})
+                json_response(
+                    self,
+                    200,
+                    {
+                        "ok": True,
+                        "slot": launch_slot(
+                            str(payload.get("proxy_url") or ""),
+                            str(payload.get("profile_dir") or ""),
+                        ),
+                    },
+                )
                 return
             if self.path == "/close":
                 slot_id = str(payload.get("slot_id") or "")
-                json_response(self, 200, {"ok": True, "closed": close_slot(slot_id)})
+                delete = bool(payload.get("delete_profile", True))
+                json_response(self, 200, {"ok": True, "closed": close_slot(slot_id, delete_profile=delete)})
+                return
+            if self.path == "/delete-profile":
+                profile_dir = str(payload.get("profile_dir") or "")
+                json_response(self, 200, {"ok": True, "deleted": delete_profile(profile_dir)})
                 return
             json_response(self, 404, {"ok": False, "error": "Not found"})
         except Exception as exc:

@@ -68,11 +68,44 @@ def test_close_slot_removes_profile_and_processes(tmp_path: Path) -> None:
     assert forward_log.closed is True
 
 
+def test_close_slot_can_keep_profile(tmp_path: Path) -> None:
+    manager = load_browser_manager()
+    manager.SLOTS.clear()
+    profile_dir = tmp_path / "slots" / "slot-test"
+    profile_dir.mkdir(parents=True)
+    process = FakeProcess()
+    forward_process = FakeProcess()
+    manager.SLOTS["slot-test"] = {
+        "slot_id": "slot-test",
+        "process": process,
+        "forward_process": forward_process,
+        "log_file": FakeLog(),
+        "forward_log": FakeLog(),
+        "profile_dir": str(profile_dir),
+    }
+
+    assert manager.close_slot("slot-test", delete_profile=False) is True
+
+    assert profile_dir.exists()
+    assert process.terminated is True
+    assert forward_process.terminated is True
+
+
 def test_close_slot_returns_false_for_missing_slot() -> None:
     manager = load_browser_manager()
     manager.SLOTS.clear()
 
     assert manager.close_slot("missing-slot") is False
+
+
+def test_delete_profile_removes_valid_retained_profile(tmp_path: Path) -> None:
+    manager = load_browser_manager()
+    manager.BASE_PROFILE_DIR = tmp_path
+    profile_dir = tmp_path / "slots" / "slot-test"
+    profile_dir.mkdir(parents=True)
+
+    assert manager.delete_profile(str(profile_dir)) is True
+    assert not profile_dir.exists()
 
 
 def test_authenticated_proxy_uses_proxy_server_and_cdp_credentials() -> None:

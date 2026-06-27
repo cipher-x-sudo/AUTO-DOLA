@@ -171,9 +171,12 @@ class DolaBrowserClient:
         self._active_slots[slot["slot_id"]] = runtime
         return runtime["context"]
 
-    async def _launch_slot(self) -> dict[str, Any]:
+    async def _launch_slot(self, profile_dir: str = "") -> dict[str, Any]:
         async with httpx.AsyncClient(timeout=30) as client:
-            response = await client.post(f"{resolve_cdp_url(self.manager_url).rstrip('/')}/launch", json={"proxy_url": self.proxy_url})
+            response = await client.post(
+                f"{resolve_cdp_url(self.manager_url).rstrip('/')}/launch",
+                json={"proxy_url": self.proxy_url, "profile_dir": profile_dir},
+            )
             response.raise_for_status()
             payload = response.json()
         if not payload.get("ok"):
@@ -238,7 +241,7 @@ class DolaBrowserClient:
         runtime["images_blocked"] = True
         runtime["resource_stats"] = resource_stats
 
-    async def close_slot(self, slot_id: str) -> bool:
+    async def close_slot(self, slot_id: str, *, delete_profile: bool = True) -> bool:
         runtime = self._active_slots.pop(slot_id, None)
         if runtime:
             try:
@@ -248,13 +251,31 @@ class DolaBrowserClient:
         if slot_id:
             try:
                 async with httpx.AsyncClient(timeout=10) as client:
-                    response = await client.post(f"{resolve_cdp_url(self.manager_url).rstrip('/')}/close", json={"slot_id": slot_id})
+                    response = await client.post(
+                        f"{resolve_cdp_url(self.manager_url).rstrip('/')}/close",
+                        json={"slot_id": slot_id, "delete_profile": delete_profile},
+                    )
                     response.raise_for_status()
                     payload = response.json()
                     return bool(payload.get("closed"))
             except Exception:
                 return False
         return False
+
+    async def delete_profile(self, profile_dir: str) -> bool:
+        if not profile_dir:
+            return False
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                response = await client.post(
+                    f"{resolve_cdp_url(self.manager_url).rstrip('/')}/delete-profile",
+                    json={"profile_dir": profile_dir},
+                )
+                response.raise_for_status()
+                payload = response.json()
+                return bool(payload.get("deleted"))
+        except Exception:
+            return False
 
     async def _slot_context(self, slot_id: str) -> BrowserContext:
         runtime = self._active_slots.get(slot_id)
@@ -365,6 +386,8 @@ class DolaBrowserClient:
             result.slot_id = slot_id
             result.diagnostic["slot_id"] = slot_id
             result.diagnostic["slot_number"] = slot.get("slot_number")
+            result.diagnostic["profile_dir"] = slot.get("profile_dir")
+            result.diagnostic["cdp_port"] = slot.get("external_port") or slot.get("port")
             result.diagnostic["initial_page_count"] = initial_page_count
             result.diagnostic["final_page_count"] = final_page_count
             result.diagnostic["closed_blank_pages"] = closed_blank_pages
@@ -409,6 +432,37 @@ class DolaBrowserClient:
         closed = await self.close_slot(slot_id)
         if log_fn:
             log_fn("Browser profile cleaned" if closed else f"Browser cleanup failed: {slot_id}", "success" if closed else "error")
+
+    async def reopen_profile_and_wait_for_ready_download(
+        self,
+        *,
+        profile_dir: str,
+        chat_url: str,
+        conversation_id: str,
+        log_fn: Any | None = None,
+        timeout_seconds: int = 240,
+    ) -> DolaBrowserDownloadResult:
+        slot = await self._launch_slot(profile_dir=profile_dir)
+        slot_id = str(slot["slot_id"])
+        if log_fn:
+            log_fn(f"Reopening saved browser profile in slot {slot.get('slot_number')}", "info")
+        try:
+            runtime = await self._connect_slot(slot)
+            self._active_slots[slot_id] = runtime
+            context = runtime["context"]
+            page = await self._allocate_job_page(context)
+            await page.goto(chat_url or f"{DOLA_CHAT_URL}{conversation_id}", wait_until="domcontentloaded", timeout=BROWSER_TIMEOUT_MS)
+            if log_fn:
+                log_fn("Saved browser profile reopened", "success")
+            return await self.wait_for_ready_video_download(
+                conversation_id,
+                slot_id=slot_id,
+                log_fn=log_fn,
+                timeout_seconds=timeout_seconds,
+                poll_attempt_label="browser fallback",
+            )
+        finally:
+            await self.close_slot(slot_id, delete_profile=True)
 
     async def wait_for_download_from_ready_card(
         self,

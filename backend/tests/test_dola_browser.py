@@ -739,9 +739,9 @@ async def test_close_slot_returns_manager_cleanup_status(monkeypatch: pytest.Mon
         async def __aexit__(self, *_args: object) -> None:
             pass
 
-        async def post(self, url: str, json: dict[str, str]) -> FakeResponse:
+        async def post(self, url: str, json: dict[str, object]) -> FakeResponse:
             assert url.endswith("/close")
-            assert json == {"slot_id": "slot-1"}
+            assert json == {"slot_id": "slot-1", "delete_profile": True}
             return FakeResponse()
 
     monkeypatch.setattr(dola_browser.httpx, "AsyncClient", lambda **_kwargs: FakeAsyncClient())
@@ -752,6 +752,64 @@ async def test_close_slot_returns_manager_cleanup_status(monkeypatch: pytest.Mon
     assert await client.close_slot("slot-1") is True
     assert fake_playwright.stopped is True
     assert "slot-1" not in client._active_slots
+
+
+@pytest.mark.asyncio
+async def test_close_slot_can_keep_profile(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakePlaywright:
+        async def stop(self) -> None:
+            return None
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            pass
+
+        def json(self) -> dict[str, bool]:
+            return {"closed": True}
+
+    class FakeAsyncClient:
+        async def __aenter__(self) -> "FakeAsyncClient":
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            pass
+
+        async def post(self, _url: str, json: dict[str, object]) -> FakeResponse:
+            assert json == {"slot_id": "slot-1", "delete_profile": False}
+            return FakeResponse()
+
+    monkeypatch.setattr(dola_browser.httpx, "AsyncClient", lambda **_kwargs: FakeAsyncClient())
+    client = DolaBrowserClient(manager_url="http://browser-manager:7070")
+    client._active_slots["slot-1"] = {"playwright": FakePlaywright()}
+
+    assert await client.close_slot("slot-1", delete_profile=False) is True
+
+
+@pytest.mark.asyncio
+async def test_delete_profile_calls_browser_manager(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            pass
+
+        def json(self) -> dict[str, bool]:
+            return {"deleted": True}
+
+    class FakeAsyncClient:
+        async def __aenter__(self) -> "FakeAsyncClient":
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            pass
+
+        async def post(self, url: str, json: dict[str, object]) -> FakeResponse:
+            assert url.endswith("/delete-profile")
+            assert json == {"profile_dir": "/data/browser-profile/slots/slot-1"}
+            return FakeResponse()
+
+    monkeypatch.setattr(dola_browser.httpx, "AsyncClient", lambda **_kwargs: FakeAsyncClient())
+    client = DolaBrowserClient(manager_url="http://browser-manager:7070")
+
+    assert await client.delete_profile("/data/browser-profile/slots/slot-1") is True
 
 
 @pytest.mark.asyncio
