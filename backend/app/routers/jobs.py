@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import asyncio
 from hmac import compare_digest
+from pathlib import Path
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import delete
 from sqlalchemy.orm import selectinload
 from sqlmodel import Session, select
@@ -145,3 +146,18 @@ async def job_events(job_id: UUID):
 def logs(session: Session = Depends(get_session)) -> list[dict]:
     rows = session.exec(select(LogEvent).order_by(LogEvent.created_at.desc()).limit(5000)).all()
     return [row.model_dump() for row in rows]
+
+
+@router.get("/browser-screenshots/{filename}")
+def browser_screenshot(filename: str) -> FileResponse:
+    if not filename.endswith(".png") or Path(filename).name != filename:
+        raise HTTPException(status_code=404, detail="Screenshot not found")
+    screenshot_dir = (settings.log_dir / "dola-browser").resolve()
+    path = (screenshot_dir / filename).resolve()
+    try:
+        path.relative_to(screenshot_dir)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Screenshot not found") from None
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Screenshot not found")
+    return FileResponse(path, media_type="image/png", filename=filename)

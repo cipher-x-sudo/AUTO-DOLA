@@ -22,18 +22,30 @@ def init_db() -> None:
 
 def ensure_runtime_columns() -> None:
     inspector = inspect(engine)
-    if "job" not in inspector.get_table_names():
+    table_names = inspector.get_table_names()
+    if "job" not in table_names:
         return
-    columns = {column["name"] for column in inspector.get_columns("job")}
-    if "dola_cookie_snapshots_json" in columns:
+    statements: list[str] = []
+    job_columns = {column["name"] for column in inspector.get_columns("job")}
+    if "dola_cookie_snapshots_json" not in job_columns:
+        statements.append(
+            "ALTER TABLE job ADD COLUMN dola_cookie_snapshots_json JSONB NOT NULL DEFAULT '[]'::jsonb"
+            if not is_sqlite
+            else "ALTER TABLE job ADD COLUMN dola_cookie_snapshots_json JSON NOT NULL DEFAULT '[]'"
+        )
+    if "jobitem" in table_names:
+        item_columns = {column["name"] for column in inspector.get_columns("jobitem")}
+        if "diagnostic_json" not in item_columns:
+            statements.append(
+                "ALTER TABLE jobitem ADD COLUMN diagnostic_json JSONB NOT NULL DEFAULT '{}'::jsonb"
+                if not is_sqlite
+                else "ALTER TABLE jobitem ADD COLUMN diagnostic_json JSON NOT NULL DEFAULT '{}'"
+            )
+    if not statements:
         return
-    ddl = (
-        "ALTER TABLE job ADD COLUMN dola_cookie_snapshots_json JSONB NOT NULL DEFAULT '[]'::jsonb"
-        if not is_sqlite
-        else "ALTER TABLE job ADD COLUMN dola_cookie_snapshots_json JSON NOT NULL DEFAULT '[]'"
-    )
     with engine.begin() as connection:
-        connection.execute(text(ddl))
+        for ddl in statements:
+            connection.execute(text(ddl))
 
 
 def get_session() -> Generator[Session, None, None]:

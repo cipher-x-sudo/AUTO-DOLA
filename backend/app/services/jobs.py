@@ -55,10 +55,19 @@ def recompute_job(session: Session, job_id: UUID) -> Job:
     return job
 
 
-def mark_item(session: Session, item: JobItem, status: str, action: str = "", error: str | None = None) -> None:
+def mark_item(
+    session: Session,
+    item: JobItem,
+    status: str,
+    action: str = "",
+    error: str | None = None,
+    diagnostic: dict | None = None,
+) -> None:
     item.status = status
     item.action = action
     item.error = error
+    if diagnostic is not None:
+        item.diagnostic_json = diagnostic
     item.updated_at = utcnow()
     session.add(item)
     session.commit()

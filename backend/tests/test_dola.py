@@ -49,7 +49,7 @@ class FakeCurlSession:
 
 def test_build_payload_includes_seedance_duration_and_prompt() -> None:
     payload = build_dola_payload(base_payload(), "cinematic city flythrough", 15, "9:16")
-    assert payload["messages"][0]["content_block"][0]["content"]["text_block"]["text"] == "Generate exactly 15 seconds vertical 9:16 video. cinematic city flythrough"
+    assert payload["messages"][0]["content_block"][0]["content"]["text_block"]["text"] == "Generate video: cinematic city flythrough"
     assert payload["chat_ability"]["ability_type"] == 17
     assert json.loads(payload["chat_ability"]["ability_param"]) == {"model": "seedance_v2.0", "duration": 15, "ratio": "9:16"}
 
@@ -201,7 +201,7 @@ async def test_common_invalid_param_has_redacted_diagnostic(monkeypatch: pytest.
     assert diagnostic["url_has_web_platform"] is True
     assert diagnostic["model"] == "seedance_v2.0"
     assert diagnostic["duration"] == 15
-    assert diagnostic["prompt_text"] == "Generate exactly 15 seconds vertical 9:16 video. a swimmer"
+    assert diagnostic["prompt_text"] == "Generate video: a swimmer"
     assert "sid=abc" not in diagnostic["body_snippet"]
 
 

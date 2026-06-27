@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import {
   Check,
   Copy,
@@ -18,7 +18,7 @@ import {
   Zap,
 } from "lucide-react"
 import { toast } from "sonner"
-import { api, artifactUrl, subscribeJobEvents } from "@/lib/api"
+import { api, artifactUrl, browserScreenshotUrl, subscribeJobEvents } from "@/lib/api"
 import type { Artifact, DolaBrowserStatus, Job, JobItem, Niche, NichePromptGroup, SettingsPayload } from "@/lib/types"
 import { Layout } from "@/components/Layout"
 import { JobTable } from "@/components/JobTable"
@@ -393,6 +393,7 @@ function VideoConsole({
             items={queueItems}
             snapshots={activeJob?.dola_cookie_snapshots_json ?? []}
             onResumePoll={resumePoll}
+            browserUrl={browserStatus?.manual_url || "http://localhost:6080"}
           />
         </div>
 
@@ -610,12 +611,15 @@ function GenerationQueue({
   items,
   snapshots,
   onResumePoll,
+  browserUrl,
 }: {
   items: JobItem[]
   snapshots: Array<Record<string, unknown>>
   onResumePoll: (itemId: string) => void
+  browserUrl: string
 }) {
   const [page, setPage] = useState(1)
+  const [expandedItemId, setExpandedItemId] = useState<string | null>(null)
   const pageCount = Math.max(1, Math.ceil(items.length / QUEUE_PAGE_SIZE))
   const safePage = Math.min(page, pageCount)
   const start = (safePage - 1) * QUEUE_PAGE_SIZE
@@ -654,22 +658,42 @@ function GenerationQueue({
           <tbody>
             {pageItems.map((item, index) => {
               const canResume = hasSavedBrowserSnapshot(snapshots, item.id) && !item.artifact_id
+              const diagnostic = item.diagnostic_json ?? {}
+              const hasDiagnostic = Object.keys(diagnostic).length > 0
               return (
-                <tr key={item.id} className="border-t border-border">
-                  <td className="px-3 py-3 text-muted-foreground">{start + index + 1}</td>
-                  <td className="max-w-[320px] truncate px-3 py-3 font-bold">{item.prompt}</td>
-                  <td className="px-3 py-3"><Badge tone={tone(item.status)}>{item.status}</Badge></td>
-                  <td className="max-w-[520px] px-3 py-3 text-muted-foreground">
-                    <div className="flex items-center gap-2">
-                      <span className="min-w-0 flex-1 truncate">{item.error || item.action || "Waiting..."}</span>
-                      {canResume && (
-                        <Button variant="secondary" className="h-7 shrink-0 px-2 text-[11px]" onClick={() => onResumePoll(item.id)}>
-                          Resume Poll
-                        </Button>
-                      )}
-                    </div>
-                  </td>
-                </tr>
+                <Fragment key={item.id}>
+                  <tr className="border-t border-border">
+                    <td className="px-3 py-3 text-muted-foreground">{start + index + 1}</td>
+                    <td className="max-w-[320px] truncate px-3 py-3 font-bold">{item.prompt}</td>
+                    <td className="px-3 py-3"><Badge tone={tone(item.status)}>{item.status}</Badge></td>
+                    <td className="max-w-[520px] px-3 py-3 text-muted-foreground">
+                      <div className="flex items-center gap-2">
+                        <span className="min-w-0 flex-1 truncate" title={item.error || item.action || "Waiting..."}>{item.error || item.action || "Waiting..."}</span>
+                        {hasDiagnostic && (
+                          <Button
+                            variant="secondary"
+                            className="h-7 shrink-0 px-2 text-[11px]"
+                            onClick={() => setExpandedItemId((current) => current === item.id ? null : item.id)}
+                          >
+                            {expandedItemId === item.id ? "Hide details" : "View details"}
+                          </Button>
+                        )}
+                        {canResume && (
+                          <Button variant="secondary" className="h-7 shrink-0 px-2 text-[11px]" onClick={() => onResumePoll(item.id)}>
+                            Resume Poll
+                          </Button>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                  {hasDiagnostic && expandedItemId === item.id && (
+                    <tr className="border-t border-border bg-black/20">
+                      <td colSpan={4} className="p-3">
+                        <BrowserDiagnosticDetails diagnostic={diagnostic} browserUrl={browserUrl} />
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
               )
             })}
             {!items.length && <tr><td className="px-3 py-5 text-center text-muted-foreground" colSpan={4}>No queued videos yet.</td></tr>}
@@ -1323,6 +1347,52 @@ function EngineTelemetry({ stats, state }: { stats: EngineTelemetryStats; state:
       </div>
     </Card>
   )
+}
+
+function BrowserDiagnosticDetails({ diagnostic, browserUrl }: { diagnostic: Record<string, unknown>; browserUrl: string }) {
+  const entries = Object.entries(diagnostic).filter(([, value]) => value !== null && value !== "" && (!Array.isArray(value) || value.length > 0))
+  const screenshotFilename = typeof diagnostic.screenshot_filename === "string" ? diagnostic.screenshot_filename : ""
+  const copyText = entries.map(([key, value]) => `${diagnosticLabel(key)}: ${formatDiagnosticValue(value)}`).join("\n")
+
+  async function copyDiagnostics() {
+    await navigator.clipboard.writeText(copyText)
+    toast.success("Diagnostics copied")
+  }
+
+  return (
+    <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_360px]">
+      <div className="min-w-0 rounded-md border border-border bg-background/70 p-3">
+        <div className="mb-3 flex flex-wrap items-center gap-2">
+          <Badge tone="error">{String(diagnostic.error_type || "BROWSER_ERROR")}</Badge>
+          <Button variant="secondary" className="h-7 px-2 text-[11px]" onClick={copyDiagnostics}><Copy size={13} />Copy diagnostics</Button>
+          <a href={browserUrl} target="_blank" rel="noreferrer" className="inline-flex h-7 items-center rounded-md bg-muted px-2 text-[11px] font-semibold text-foreground">Open browser</a>
+        </div>
+        <dl className="grid gap-x-4 gap-y-2 sm:grid-cols-[150px_minmax(0,1fr)]">
+          {entries.filter(([key]) => !["screenshot_filename", "screenshot_url", "captured_request"].includes(key)).map(([key, value]) => (
+            <Fragment key={key}>
+              <dt className="font-bold text-muted-foreground">{diagnosticLabel(key)}</dt>
+              <dd className="min-w-0 whitespace-pre-wrap break-words font-mono text-foreground">{formatDiagnosticValue(value)}</dd>
+            </Fragment>
+          ))}
+        </dl>
+      </div>
+      {screenshotFilename && (
+        <a href={browserScreenshotUrl(screenshotFilename)} target="_blank" rel="noreferrer" className="block overflow-hidden rounded-md border border-border bg-black">
+          <img src={browserScreenshotUrl(screenshotFilename)} alt="Dola browser failure" className="h-auto max-h-[320px] w-full object-contain" />
+        </a>
+      )}
+    </div>
+  )
+}
+
+function diagnosticLabel(key: string) {
+  return key.replace(/_/g, " ").replace(/\b\w/g, (character: string) => character.toUpperCase())
+}
+
+function formatDiagnosticValue(value: unknown) {
+  if (Array.isArray(value)) return value.join(", ")
+  if (typeof value === "object" && value !== null) return JSON.stringify(value, null, 2)
+  return String(value)
 }
 
 function TelemetryTile({ label, value, tone: tileTone }: { label: string; value: number; tone: "default" | "green" | "red" | "amber" | "blue" | "pink" | "violet" }) {

@@ -7,6 +7,7 @@ export interface JobItem {
   status: JobStatus
   action: string
   error?: string | null
+  diagnostic_json?: Record<string, unknown>
   artifact_id?: string | null
   updated_at: string
 }

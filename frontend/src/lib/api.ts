@@ -52,6 +52,10 @@ export function artifactUrl(id: string) {
   return `${API_BASE}/api/artifacts/${id}/download`
 }
 
+export function browserScreenshotUrl(filename: string) {
+  return `${API_BASE}/api/video/browser-screenshots/${encodeURIComponent(filename)}`
+}
+
 export function subscribeJobEvents(
   jobId: string,
   onMessage: (event: { type: string; level?: string; message?: string; [key: string]: unknown }) => void,

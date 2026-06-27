@@ -576,10 +576,8 @@ def build_dola_payload(template: dict[str, Any], prompt: str, duration: int, rat
 
 
 def build_video_prompt_text(prompt: str, duration: int, ratio: str) -> str:
-    ratio = str(ratio or "9:16")
-    orientation = "vertical" if ratio == "9:16" else "horizontal" if ratio == "16:9" else "square" if ratio == "1:1" else ""
-    ratio_text = f"{orientation} {ratio}".strip()
-    return f"Generate exactly {int(duration)} seconds {ratio_text} video. {prompt}"
+    clean_prompt = re.sub(r"(?i)^generate\s+video\s*:\s*", "", prompt.strip()).strip()
+    return f"Generate video: {clean_prompt}"
 
 
 def build_chain_poll_body(conversation_id: str, conversation_type: int) -> dict[str, Any]:

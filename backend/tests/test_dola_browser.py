@@ -17,6 +17,7 @@ from app.services.dola_browser import (
     proxy_public_host,
     sanitize_replay_headers,
     vid_from_download_url,
+    format_browser_diagnostic,
 )
 from app.services.dola import DolaSession
 
@@ -121,6 +122,52 @@ async def test_proxy_auth_is_handled_through_cdp() -> None:
         },
     ) in context.session.commands
     assert runtime["proxy_auth_mode"] == "cdp"
+    assert runtime["images_blocked"] is True
+
+    image_callback = context.session.handlers["Fetch.requestPaused"]
+    image_task = image_callback({"requestId": "image-1", "resourceType": "Image"})  # type: ignore[operator]
+    await image_task
+    assert ("Fetch.failRequest", {"requestId": "image-1", "errorReason": "BlockedByClient"}) in context.session.commands
+    assert runtime["resource_stats"]["blocked_image_count"] == 1  # type: ignore[index]
+
+    xhr_task = image_callback({"requestId": "xhr-1", "resourceType": "XHR"})  # type: ignore[operator]
+    await xhr_task
+    assert ("Fetch.continueRequest", {"requestId": "xhr-1"}) in context.session.commands
+
+
+@pytest.mark.asyncio
+async def test_image_blocking_is_installed_without_proxy_auth() -> None:
+    class FakeSession:
+        def __init__(self) -> None:
+            self.handlers: dict[str, object] = {}
+            self.commands: list[tuple[str, dict[str, object]]] = []
+
+        def on(self, event: str, callback: object) -> None:
+            self.handlers[event] = callback
+
+        async def send(self, method: str, params: dict[str, object]) -> None:
+            self.commands.append((method, params))
+
+    class FakeContext:
+        def __init__(self) -> None:
+            self.pages = [object()]
+            self.session = FakeSession()
+
+        async def new_cdp_session(self, _page: object) -> FakeSession:
+            return self.session
+
+        def on(self, _event: str, _callback: object) -> None:
+            pass
+
+    client = DolaBrowserClient()
+    context = FakeContext()
+    runtime: dict[str, object] = {}
+
+    await client._install_proxy_auth_handlers(context, {"proxy_auth_mode": "none"}, runtime)  # type: ignore[arg-type]
+
+    assert ("Fetch.enable", {"handleAuthRequests": False}) in context.session.commands
+    assert "Fetch.authRequired" not in context.session.handlers
+    assert "Fetch.requestPaused" in context.session.handlers
 
 
 def test_vid_from_download_url() -> None:
@@ -129,10 +176,12 @@ def test_vid_from_download_url() -> None:
     assert vid_from_download_url(url) == "okqOYb95GBfIYxFNgF7E0Q9QBPqhwrfMNUhDEw"
 
 
-def test_build_browser_video_prompt_text_uses_visible_ten_for_fifteen_second_patch() -> None:
-    assert build_browser_video_prompt_text("cinematic 15-second city", 15, "9:16") == "Generate exactly 10 seconds vertical 9:16 video. cinematic 10-second city"
-    assert build_browser_video_prompt_text("cinematic city", 10, "9:16") == "Generate exactly 10 seconds vertical 9:16 video. cinematic city"
-    assert build_browser_video_prompt_text("cinematic city", 5, "9:16") == "Generate exactly 5 seconds vertical 9:16 video. cinematic city"
+def test_build_browser_video_prompt_text_uses_simple_prefix_for_all_settings() -> None:
+    expected = "Generate video: cinematic 15-second city"
+    for duration in (5, 10, 15):
+        for ratio in ("9:16", "16:9", "1:1"):
+            assert build_browser_video_prompt_text("cinematic 15-second city", duration, ratio) == expected
+    assert build_browser_video_prompt_text("Generate video: cinematic city", 10, "9:16") == "Generate video: cinematic city"
 
 
 def test_duration_patch_script_rewrites_five_or_ten_to_fifteen() -> None:
@@ -143,6 +192,528 @@ def test_duration_patch_script_rewrites_five_or_ten_to_fifteen() -> None:
 
 def test_extract_duration_and_ratio_from_post_data() -> None:
     assert extract_duration_and_ratio_from_post_data('{"chat_ability":{"ability_param":"{\\"duration\\":15,\\"ratio\\":\\"9:16\\"}"}}') == (15, "9:16")
+
+
+def test_browser_diagnostic_formatter_omits_empty_fields() -> None:
+    formatted = format_browser_diagnostic(
+        {
+            "error_type": "PAGE_LOAD_TIMEOUT",
+            "user_message": "Dola page did not finish loading.",
+            "stage": "page_loading",
+            "timeout_seconds": 120,
+            "error_code": None,
+            "error_msg": "",
+            "visible_elements": ["loading_skeleton"],
+        }
+    )
+
+    assert "Error type: PAGE_LOAD_TIMEOUT" in formatted
+    assert "Timeout: 120s" in formatted
+    assert "loading_skeleton" in formatted
+    assert "None" not in formatted
+    assert "Dola error:" not in formatted
+
+
+@pytest.mark.asyncio
+async def test_page_ready_waits_for_video_tab_instead_of_failing_on_skeleton(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeVideoTab:
+        def __init__(self) -> None:
+            self.checks = 0
+
+        async def count(self) -> int:
+            self.checks += 1
+            return 1 if self.checks >= 3 else 0
+
+        def nth(self, _index: int) -> "FakeVideoTab":
+            return self
+
+        async def is_visible(self) -> bool:
+            return True
+
+    class FakePage:
+        url = "https://www.dola.com/chat/create-image"
+
+        def __init__(self) -> None:
+            self.video_tab = FakeVideoTab()
+
+        def get_by_role(self, _role: str, **_kwargs: object) -> FakeVideoTab:
+            return self.video_tab
+
+    client = DolaBrowserClient(proxy_url="http://proxy.example.com:2312")
+    page = FakePage()
+    network = BrowserNetworkState()
+    logs: list[str] = []
+
+    async def no_block(_page: object, _network: BrowserNetworkState) -> None:
+        return None
+
+    async def visible(_page: object) -> list[str]:
+        return ["loading_skeleton"]
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    async def no_dismiss(*_args: object, **_kwargs: object) -> bool:
+        return False
+
+    monkeypatch.setattr(client, "_raise_if_blocked", no_block)
+    monkeypatch.setattr(client, "_visible_dola_elements", visible)
+    monkeypatch.setattr(client, "_dismiss_cookie_banner", no_dismiss)
+    monkeypatch.setattr(client, "_dismiss_login_popup", no_dismiss)
+    monkeypatch.setattr(dola_browser.asyncio, "sleep", no_sleep)
+
+    await client._ensure_dola_ready(page, network, lambda message, _level: logs.append(message))  # type: ignore[arg-type]
+
+    assert network.last_successful_stage == "page_ready"
+    assert network.visible_elements == ["loading_skeleton"]
+    assert logs and logs[0].startswith("Waiting for Dola page")
+    assert dola_browser.PROXY_PAGE_TIMEOUT_SECONDS == 120
+
+
+@pytest.mark.asyncio
+async def test_submit_button_waits_until_candidate_is_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeButton:
+        def __init__(self) -> None:
+            self.enabled_checks = 0
+
+        async def is_visible(self) -> bool:
+            return True
+
+        async def is_enabled(self) -> bool:
+            self.enabled_checks += 1
+            return self.enabled_checks >= 3
+
+    class EmptyLocator:
+        async def count(self) -> int:
+            return 0
+
+    class FakePage:
+        def locator(self, _selector: str) -> EmptyLocator:
+            return EmptyLocator()
+
+    class FakeTextbox:
+        pass
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(dola_browser.asyncio, "sleep", no_sleep)
+    client = DolaBrowserClient()
+    button = FakeButton()
+
+    result = await client._wait_for_submit_button(FakePage(), FakeTextbox(), 1, button)  # type: ignore[arg-type]
+
+    assert result is button
+    assert button.enabled_checks == 3
+
+
+@pytest.mark.asyncio
+async def test_submit_candidate_uses_stable_send_wrapper() -> None:
+    class FakeButton:
+        async def count(self) -> int:
+            return 1
+
+        def nth(self, _index: int) -> "FakeLocator":
+            return self
+
+        def nth(self, _index: int) -> "FakeButton":
+            return self
+
+        async def is_visible(self) -> bool:
+            return True
+
+    class EmptyButton(FakeButton):
+        async def count(self) -> int:
+            return 0
+
+    class FakePage:
+        def __init__(self) -> None:
+            self.requested: list[str] = []
+            self.send = FakeButton()
+
+        def locator(self, selector: str) -> FakeButton:
+            self.requested.append(selector)
+            return self.send if selector == ".send-btn-wrapper > button" else EmptyButton()
+
+    page = FakePage()
+    client = DolaBrowserClient()
+
+    result = await client._find_submit_button_candidate(page, object())  # type: ignore[arg-type]
+
+    assert result is page.send
+    assert page.requested[0] == ".send-btn-wrapper > button"
+
+
+@pytest.mark.asyncio
+async def test_submit_clicks_stable_button_once_without_pressing_enter(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeInput:
+        def __init__(self) -> None:
+            self.text = ""
+
+        async def click(self, **_kwargs: object) -> None:
+            pass
+
+        async def inner_text(self) -> str:
+            return self.text
+
+    class FakeButton:
+        def __init__(self) -> None:
+            self.clicks = 0
+
+        async def click(self, **_kwargs: object) -> None:
+            self.clicks += 1
+
+    class FakeKeyboard:
+        def __init__(self, input_locator: FakeInput) -> None:
+            self.input = input_locator
+            self.pressed: list[str] = []
+
+        async def press(self, key: str) -> None:
+            self.pressed.append(key)
+            if key == "Backspace":
+                self.input.text = ""
+
+        async def insert_text(self, text: str) -> None:
+            self.input.text = text
+
+        async def type(self, text: str, **_kwargs: object) -> None:
+            self.input.text += text
+
+    class FakePage:
+        def __init__(self, input_locator: FakeInput) -> None:
+            self.keyboard = FakeKeyboard(input_locator)
+
+    client = DolaBrowserClient()
+    input_locator = FakeInput()
+    button = FakeButton()
+    page = FakePage(input_locator)
+    logs: list[str] = []
+
+    async def noop(_page: object) -> None:
+        pass
+
+    async def no_login(*_args: object, **_kwargs: object) -> bool:
+        return False
+
+    async def find_input(_page: object, _timeout: int) -> FakeInput:
+        return input_locator
+
+    async def find_button(_page: object, _textbox: object) -> FakeButton:
+        return button
+
+    async def wait_button(_page: object, _textbox: object, _timeout: int, _candidate: object) -> FakeButton:
+        return button
+
+    monkeypatch.setattr(client, "_dismiss_cookie_banner", noop)
+    monkeypatch.setattr(client, "_dismiss_login_popup", no_login)
+    monkeypatch.setattr(client, "_dismiss_modal_overlays", noop)
+    monkeypatch.setattr(client, "_wait_for_video_textbox", find_input)
+    monkeypatch.setattr(client, "_find_submit_button_candidate", find_button)
+    monkeypatch.setattr(client, "_wait_for_submit_button", wait_button)
+
+    await client._submit_via_ui(page, "test prompt", BrowserNetworkState(), lambda message, _level: logs.append(message))  # type: ignore[arg-type]
+
+    assert button.clicks == 1
+    assert "Enter" not in page.keyboard.pressed
+    assert logs == ["Entering prompt", "Prompt verified", "Waiting for submit button", "Submitting prompt"]
+
+
+@pytest.mark.asyncio
+async def test_video_mode_ready_without_selected_tab_attributes(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeLocator:
+        def __init__(self) -> None:
+            self.clicks = 0
+
+        async def count(self) -> int:
+            return 1
+
+        async def is_visible(self) -> bool:
+            return True
+
+        def nth(self, _index: int) -> "FakeLocator":
+            return self
+
+        async def click(self, **_kwargs: object) -> None:
+            self.clicks += 1
+
+    class FakePage:
+        def __init__(self) -> None:
+            self.video = FakeLocator()
+            self.model = FakeLocator()
+            self.ratio = FakeLocator()
+
+        def get_by_role(self, role: str, **kwargs: object) -> FakeLocator:
+            name = kwargs.get("name")
+            if role == "tab" and name == "Video":
+                return self.video
+            if role == "button" and name == "Seedance 2.0 Fast":
+                return self.model
+            if role == "button" and name == "Ratio":
+                return self.ratio
+            raise AssertionError(f"Unexpected role lookup: {role} {name}")
+
+    client = DolaBrowserClient()
+    page = FakePage()
+    network = BrowserNetworkState()
+    logs: list[str] = []
+
+    async def no_popup(*_args: object, **_kwargs: object) -> bool:
+        return False
+
+    async def no_block(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    async def textbox(_page: object) -> object:
+        return object()
+
+    async def duration(_page: object) -> bool:
+        return True
+
+    monkeypatch.setattr(client, "_dismiss_login_popup", no_popup)
+    monkeypatch.setattr(client, "_raise_if_blocked", no_block)
+    monkeypatch.setattr(client, "_find_video_textbox", textbox)
+    monkeypatch.setattr(client, "_duration_control_visible", duration)
+
+    await client._select_video_mode(page, network, lambda message, _level: logs.append(message))  # type: ignore[arg-type]
+
+    assert page.video.clicks == 1
+    assert network.last_successful_stage == "video_mode_ready"
+    assert network.video_tab_visible is True
+    assert network.model_visible is True
+    assert network.duration_visible is True
+    assert network.ratio_visible is True
+    assert network.textbox_visible is True
+    assert logs == ["Video tab clicked", "Video controls ready"]
+
+
+@pytest.mark.asyncio
+async def test_visible_control_is_selected_from_hidden_duplicate_dom() -> None:
+    class Candidate:
+        def __init__(self, visible: bool) -> None:
+            self.visible = visible
+
+        async def is_visible(self) -> bool:
+            return self.visible
+
+    class DuplicateLocator:
+        def __init__(self) -> None:
+            self.candidates = [Candidate(False), Candidate(True)]
+
+        async def count(self) -> int:
+            return len(self.candidates)
+
+        def nth(self, index: int) -> Candidate:
+            return self.candidates[index]
+
+    class FakePage:
+        def __init__(self) -> None:
+            self.duration = DuplicateLocator()
+
+        def get_by_role(self, _role: str, **kwargs: object) -> DuplicateLocator:
+            if kwargs.get("name") == "5s":
+                return self.duration
+            return DuplicateLocator()
+
+    client = DolaBrowserClient()
+    locator = DuplicateLocator()
+
+    visible = await client._first_visible(locator)  # type: ignore[arg-type]
+
+    assert visible is locator.candidates[1]
+    assert await client._duration_control_visible(FakePage()) is True  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_ratio_verification_accepts_dola_ratio_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeLocator:
+        def __init__(self, present: bool) -> None:
+            self.present = present
+
+        async def count(self) -> int:
+            return int(self.present)
+
+        def nth(self, _index: int) -> "FakeLocator":
+            return self
+
+        async def is_visible(self) -> bool:
+            return self.present
+
+        async def inner_text(self) -> str:
+            return "Ratio 9:16"
+
+    class FakePage:
+        def get_by_role(self, role: str, **kwargs: object) -> FakeLocator:
+            return FakeLocator(role == "button" and kwargs.get("name") == "Ratio 9:16")
+
+    client = DolaBrowserClient()
+    network = BrowserNetworkState()
+
+    async def no_popup(*_args: object, **_kwargs: object) -> bool:
+        return False
+
+    monkeypatch.setattr(client, "_dismiss_login_popup", no_popup)
+
+    await client._select_ratio(FakePage(), "9:16", network, None)  # type: ignore[arg-type]
+
+    assert network.selected_ratio == "9:16"
+
+
+@pytest.mark.asyncio
+async def test_closeable_login_popup_is_dismissed(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeClose:
+        def __init__(self) -> None:
+            self.clicks = 0
+
+        async def count(self) -> int:
+            return 1
+
+        def nth(self, _index: int) -> "FakeClose":
+            return self
+
+        async def is_visible(self) -> bool:
+            return True
+
+        async def click(self, **_kwargs: object) -> None:
+            self.clicks += 1
+
+    class EmptyClose(FakeClose):
+        async def count(self) -> int:
+            return 0
+
+    class FakeKeyboard:
+        async def press(self, _key: str) -> None:
+            pass
+
+    class FakePage:
+        def __init__(self) -> None:
+            self.close = FakeClose()
+            self.keyboard = FakeKeyboard()
+
+        def locator(self, selector: str) -> FakeClose:
+            return self.close if selector == "[role='dialog'] .semi-modal-close" else EmptyClose()
+
+    client = DolaBrowserClient()
+    visible_states = iter([True, False])
+    logs: list[tuple[str, str]] = []
+
+    async def popup_visible(_page: object) -> bool:
+        return next(visible_states)
+
+    monkeypatch.setattr(client, "_login_popup_visible", popup_visible)
+    page = FakePage()
+
+    closed = await client._dismiss_login_popup(page, BrowserNetworkState(), lambda message, level: logs.append((message, level)))  # type: ignore[arg-type]
+
+    assert closed is True
+    assert page.close.clicks == 1
+    assert logs == [
+        ("Dola login popup detected", "warn"),
+        ("Dola login popup closed", "success"),
+        ("Continuing Dola page loading", "info"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_uncloseable_login_popup_fails_after_three_attempts(monkeypatch: pytest.MonkeyPatch) -> None:
+    class EmptyClose:
+        async def count(self) -> int:
+            return 0
+
+    class FakeKeyboard:
+        def __init__(self) -> None:
+            self.presses = 0
+
+        async def press(self, _key: str) -> None:
+            self.presses += 1
+
+    class FakePage:
+        url = "https://www.dola.com/chat/create-image"
+
+        def __init__(self) -> None:
+            self.keyboard = FakeKeyboard()
+
+        def locator(self, _selector: str) -> EmptyClose:
+            return EmptyClose()
+
+    client = DolaBrowserClient()
+
+    async def always_visible(_page: object) -> bool:
+        return True
+
+    async def no_screenshot(_page: object, _name: str) -> str:
+        return ""
+
+    ticks = iter(range(0, 100, 3))
+    monkeypatch.setattr(client, "_login_popup_visible", always_visible)
+    monkeypatch.setattr(client, "_screenshot", no_screenshot)
+    monkeypatch.setattr(dola_browser.time, "monotonic", lambda: next(ticks))
+    page = FakePage()
+
+    with pytest.raises(DolaBrowserError) as exc_info:
+        await client._dismiss_login_popup(page, BrowserNetworkState())  # type: ignore[arg-type]
+
+    assert exc_info.value.error_type == "LOGIN_REQUIRED"
+    assert "three attempts" in str(exc_info.value)
+    assert page.keyboard.presses == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ratio", ["9:16", "16:9", "1:1"])
+@pytest.mark.parametrize(("duration", "ui_duration"), [(5, 5), (10, 10), (15, 10)])
+async def test_generation_options_select_exact_ratio_and_duration(
+    monkeypatch: pytest.MonkeyPatch,
+    ratio: str,
+    duration: int,
+    ui_duration: int,
+) -> None:
+    client = DolaBrowserClient()
+    network = BrowserNetworkState()
+    calls: list[tuple[str, object]] = []
+
+    async def select_ratio(_page: object, value: str, _network: BrowserNetworkState, _log_fn: object) -> None:
+        calls.append(("ratio", value))
+        _network.selected_ratio = value
+
+    async def select_duration(_page: object, value: int, _network: BrowserNetworkState, _log_fn: object) -> None:
+        calls.append(("duration", value))
+        _network.selected_duration = value
+
+    monkeypatch.setattr(client, "_select_ratio", select_ratio)
+    monkeypatch.setattr(client, "_select_duration", select_duration)
+
+    await client._select_generation_options(object(), duration, ratio, network)  # type: ignore[arg-type]
+
+    assert calls == [("ratio", ratio), ("duration", ui_duration)]
+    assert network.requested_duration == duration
+    assert network.requested_ratio == ratio
+    assert network.selected_duration == ui_duration
+
+
+@pytest.mark.asyncio
+async def test_captured_generation_option_mismatch_fails_before_session_build(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = DolaBrowserClient()
+    network = BrowserNetworkState(
+        conversation_id="123456789",
+        captured_url="https://www.dola.com/chat/completion",
+        requested_duration=15,
+        requested_ratio="9:16",
+        captured_duration=10,
+        captured_ratio="9:16",
+    )
+
+    class FakePage:
+        url = "https://www.dola.com/chat/123456789"
+
+    async def no_screenshot(_page: object, _name: str) -> str:
+        return ""
+
+    monkeypatch.setattr(client, "_screenshot", no_screenshot)
+
+    with pytest.raises(DolaBrowserError) as exc_info:
+        await client._wait_for_submit_capture(object(), FakePage(), network)  # type: ignore[arg-type]
+
+    assert exc_info.value.error_type == "GENERATION_OPTIONS_MISMATCH"
+    assert "requested 15s 9:16, captured 10s 9:16" in str(exc_info.value)
 
 
 @pytest.mark.asyncio
@@ -220,8 +791,9 @@ async def test_wait_for_submit_capture_requires_conversation_id(monkeypatch: pyt
     class FakePage:
         url = "https://www.dola.com/chat/"
 
-    with pytest.raises(Exception, match="conversation_id was not captured"):
+    with pytest.raises(DolaBrowserError, match="could not capture the submitted conversation") as exc_info:
         await client._wait_for_submit_capture(None, FakePage(), network)  # type: ignore[arg-type]
+    assert exc_info.value.error_type == "SUBMIT_NOT_CAPTURED"
 
 
 @pytest.mark.asyncio
@@ -327,14 +899,17 @@ async def test_submit_browser_flow_navigates_selects_video_and_submits(monkeypat
     async def fake_noop(*_args: object, **_kwargs: object) -> None:
         pass
 
-    async def fake_select_video(_page: FakePage) -> None:
+    async def fake_select_video(_page: FakePage, _network: BrowserNetworkState, _log_fn: object) -> None:
         events.append("select-video")
 
-    async def fake_submit(_page: FakePage, prompt: str) -> None:
+    async def fake_select_options(_page: FakePage, _duration: int, _ratio: str, _network: BrowserNetworkState, _log_fn: object) -> None:
+        events.append("select-options")
+
+    async def fake_submit(_page: FakePage, prompt: str, _network: BrowserNetworkState, _log_fn: object) -> None:
         events.append("submit")
         submitted_prompts.append(prompt)
 
-    async def fake_wait(_context: FakeContext, _page: FakePage, _network: BrowserNetworkState) -> DolaBrowserSubmitResult:
+    async def fake_wait(_context: FakeContext, _page: FakePage, _network: BrowserNetworkState, _log_fn: object) -> DolaBrowserSubmitResult:
         return DolaBrowserSubmitResult(
             session=DolaSession(
                 url="https://www.dola.com/chat/completion?fp=verify_test&web_platform=web",
@@ -355,15 +930,16 @@ async def test_submit_browser_flow_navigates_selects_video_and_submits(monkeypat
     monkeypatch.setattr(client, "_ensure_dola_ready", fake_noop)
     monkeypatch.setattr(client, "_raise_if_blocked", fake_noop)
     monkeypatch.setattr(client, "_select_video_mode", fake_select_video)
+    monkeypatch.setattr(client, "_select_generation_options", fake_select_options)
     monkeypatch.setattr(client, "_submit_via_ui", fake_submit)
     monkeypatch.setattr(client, "_wait_for_submit_capture", fake_wait)
 
     result = await client.submit_and_capture_session("cinematic city", 15, "9:16")
 
     assert result.slot_id == "slot-1"
-    assert events == ["hook", "goto", "select-video", "submit"]
+    assert events == ["hook", "goto", "select-video", "select-options", "submit"]
     assert context.pages[0].url == "https://www.dola.com/chat/create-image"
-    assert submitted_prompts == ["Generate exactly 10 seconds vertical 9:16 video. cinematic city"]
+    assert submitted_prompts == ["Generate video: cinematic city"]
 
 
 @pytest.mark.asyncio
@@ -392,9 +968,13 @@ async def test_wait_for_ready_video_download_clicks_ready_card_and_returns_video
     async def fake_video_src(_page: FakePage) -> str:
         return "https://v16-dola.dola.com/x/video/tos/mya/tos-mya-ve-50851/video_abc/?download=true" if clicked else ""
 
+    async def no_login(*_args: object, **_kwargs: object) -> bool:
+        return False
+
     monkeypatch.setattr(client, "_slot_page", fake_slot_page)
     monkeypatch.setattr(client, "_click_ready_video_card", fake_click_ready)
     monkeypatch.setattr(client, "_video_src_from_dom", fake_video_src)
+    monkeypatch.setattr(client, "_dismiss_login_popup", no_login)
 
     result = await client.wait_for_ready_video_download(
         "123456789",

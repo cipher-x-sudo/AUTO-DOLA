@@ -60,6 +60,7 @@ class JobItem(SQLModel, table=True):
     status: str = Field(default=ItemStatus.queued, max_length=32)
     action: str = Field(default="", max_length=240)
     error: str | None = None
+    diagnostic_json: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON().with_variant(JSONB, "postgresql"), nullable=False, default=dict))
     artifact_id: UUID | None = Field(default=None, index=True)
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)

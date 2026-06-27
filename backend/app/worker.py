@@ -103,7 +103,8 @@ async def process_video(session: Session, job: Job) -> None:
         dola_mode = "hybrid"
     requested_duration = int(config.get("duration", 10))
     effective_dola_mode = "browser" if dola_mode == "hybrid" and requested_duration == 15 else dola_mode
-    client = DolaClient(app_settings.get("dola_auth_cookies", settings.dola_auth_cookies), settings.dola_default_region, proxy=proxy_url)
+    submit_client = DolaClient(app_settings.get("dola_auth_cookies", settings.dola_auth_cookies), settings.dola_default_region, proxy=proxy_url)
+    poll_client = DolaClient(app_settings.get("dola_auth_cookies", settings.dola_auth_cookies), settings.dola_default_region)
     browser_client = DolaBrowserClient(proxy_url=proxy_url)
     items = session.exec(select(JobItem).where(JobItem.job_id == job.id)).all()
     item_numbers = {item.id: index + 1 for index, item in enumerate(items)}
@@ -111,7 +112,7 @@ async def process_video(session: Session, job: Job) -> None:
     parallel = effective_video_parallel(requested_parallel)
     log(session, f"Video concurrency requested: {requested_parallel}", "info", job.id)
     log(session, f"Video concurrency effective: {parallel}", "info", job.id)
-    log(session, f"Video settings: duration={requested_duration}, ratio={config.get('ratio', '9:16')}, mode={effective_dola_mode}, proxy_enabled={bool(proxy_url)}", "info", job.id)
+    log(session, f"Video settings: duration={requested_duration}, ratio={config.get('ratio', '9:16')}, mode={effective_dola_mode}, submit_proxy_enabled={bool(proxy_url)}, polling_proxy_enabled=False", "info", job.id)
     max_retries = max(int(config.get("max_retries", 3)), HIGH_DEMAND_MIN_RETRIES)
     semaphore = asyncio.Semaphore(parallel)
     browser_submit_semaphore = asyncio.Semaphore(min(BROWSER_SUBMIT_PARALLEL, parallel))
@@ -136,6 +137,7 @@ async def process_video(session: Session, job: Job) -> None:
                         mark_item(session_local, db_item, ItemStatus.cancelled, "Force stopped")
                     return
                 last_error = ""
+                last_diagnostic: dict = {}
                 video_label = f"Video {item_numbers.get(db_item.id, 0)} | {db_item.id.hex[:8]}"
 
                 def item_log(message: str, level: str = "info") -> None:
@@ -213,12 +215,32 @@ async def process_video(session: Session, job: Job) -> None:
                         else:
                             item_log(f"Browser cleanup failed: {browser_slot_id}", "error")
 
+                    def browser_submit_log(message: str, level: str = "info") -> None:
+                        progress_prefixes = (
+                            "Waiting for Dola page ",
+                            "Video tab clicked",
+                            "Video controls ready",
+                            "Selecting ratio ",
+                            "Ratio selected: ",
+                            "Selecting duration ",
+                            "Duration selected: ",
+                            "Generation options verified",
+                            "Entering prompt",
+                            "Prompt verified",
+                            "Waiting for submit button",
+                            "Submitting prompt",
+                            "Submission captured",
+                        )
+                        if message.startswith(progress_prefixes):
+                            mark_item(session_local, db_item, ItemStatus.running, f"{action_prefix}{message}")
+                        item_log(f"Dola browser: {message}", level)
+
                     async with browser_submit_semaphore:
                         browser_result = await browser_client.submit_and_capture_session(
                             db_item.prompt,
                             int(config.get("duration", 10)),
                             str(config.get("ratio", "9:16")),
-                            log_fn=lambda message, level: item_log(f"Dola browser: {message}", level),
+                            log_fn=browser_submit_log,
                         )
                     browser_slot_id = browser_result.slot_id
                     conversation_hint = browser_result.conversation_id[-8:] if len(browser_result.conversation_id) > 8 else browser_result.conversation_id
@@ -254,7 +276,7 @@ async def process_video(session: Session, job: Job) -> None:
                         item_log("Captured browser session. Switching to direct HTTP poll/download.", "info")
                         item_log(format_browser_diagnostic(browser_result.diagnostic), "info")
                         mark_item(session_local, db_item, ItemStatus.running, f"{action_prefix}Polling video id 1/{VIDEO_POLL_ATTEMPTS}")
-                        item_log("Polling video id with browser session over HTTP.", "info")
+                        item_log("Polling video id with browser session over direct HTTP (proxy disabled).", "info")
 
                         browser_ready_event = asyncio.Event()
 
@@ -264,7 +286,7 @@ async def process_video(session: Session, job: Job) -> None:
                             item_log(f"Dola browser: {message}", level)
 
                         async def poll_http_video_id() -> str | None:
-                            return await client.poll_video_id(
+                            return await poll_client.poll_video_id(
                                 browser_result.session,
                                 browser_result.conversation_id,
                                 browser_result.conversation_type,
@@ -371,8 +393,8 @@ async def process_video(session: Session, job: Job) -> None:
                                 raise DolaBrowserError("Dola video ready/download URL not captured.", browser_ready_error.diagnostic)
                             raise RuntimeError("Dola video ready/download URL not captured.")
                         mark_item(session_local, db_item, ItemStatus.running, f"{action_prefix}Polling play_info 1/200")
-                        item_log("Polling play_info with browser session over HTTP.", "info")
-                        download_url = await client.poll_download_url(
+                        item_log("Polling play_info with browser session over direct HTTP (proxy disabled).", "info")
+                        download_url = await poll_client.poll_download_url(
                             browser_result.session,
                             vid,
                             cancel_fn=job_cancelled_or_missing,
@@ -386,6 +408,7 @@ async def process_video(session: Session, job: Job) -> None:
                         await cleanup_browser_slot("success" if browser_completed else "rejection")
 
                 for attempt in range(1, max_retries + 1):
+                    last_diagnostic = {}
                     try:
                         ensure_not_cancelled(session_local, db_item.id)
                         action_prefix = f"[{attempt}/{max_retries}] " if max_retries > 1 else ""
@@ -393,7 +416,7 @@ async def process_video(session: Session, job: Job) -> None:
                             await run_browser_generation(action_prefix, attempt)
                             return
                         mark_item(session_local, db_item, ItemStatus.running, f"{action_prefix}Building Dola session")
-                        dola_session = await client.build_session()
+                        dola_session = await submit_client.build_session()
                         ensure_not_cancelled(session_local, db_item.id)
                         cookie_snapshot = create_cookie_snapshot(session_local, job.id, db_item.id, attempt, dola_session)
 
@@ -416,7 +439,7 @@ async def process_video(session: Session, job: Job) -> None:
                         payload = build_dola_payload(dola_session.payload_template, db_item.prompt, config.get("duration", 10), config.get("ratio", "9:16"))
                         ensure_not_cancelled(session_local, db_item.id)
                         mark_item(session_local, db_item, ItemStatus.running, f"{action_prefix}Submitting Seedance request")
-                        submit_result = await client.submit(dola_session, payload, raw_response_fn=record_raw_response, attempt=attempt)
+                        submit_result = await submit_client.submit(dola_session, payload, raw_response_fn=record_raw_response, attempt=attempt)
                         ensure_not_cancelled(session_local, db_item.id)
                         conversation_id = submit_result.conversation_id
                         conversation_type = submit_result.conversation_type
@@ -429,7 +452,7 @@ async def process_video(session: Session, job: Job) -> None:
                                 raise DolaTerminalGenerationError(f"Dola rejected this prompt: {assistant_message[:500]}")
                             item_log(f"Dola: {assistant_message}", "info")
                         mark_item(session_local, db_item, ItemStatus.running, f"{action_prefix}Processing video request")
-                        vid = await client.poll_video_id(
+                        vid = await poll_client.poll_video_id(
                             dola_session,
                             conversation_id,
                             conversation_type,
@@ -449,7 +472,7 @@ async def process_video(session: Session, job: Job) -> None:
                                 return
                             raise RuntimeError("Dola did not return video id.")
                         mark_item(session_local, db_item, ItemStatus.running, f"{action_prefix}Polling download URL")
-                        download_url = await client.poll_download_url(
+                        download_url = await poll_client.poll_download_url(
                             dola_session,
                             vid,
                             raw_response_fn=record_raw_response,
@@ -482,6 +505,7 @@ async def process_video(session: Session, job: Job) -> None:
                                 return
                             except DolaBrowserError as browser_exc:
                                 last_error = str(browser_exc)
+                                last_diagnostic = browser_exc.diagnostic
                                 item_log(format_browser_diagnostic(browser_exc.diagnostic), "error")
                                 if attempt >= max_retries:
                                     break
@@ -501,6 +525,8 @@ async def process_video(session: Session, job: Job) -> None:
                         return
                     except DolaBrowserError as exc:
                         last_error = str(exc)
+                        last_diagnostic = exc.diagnostic
+                        item_log(last_error, "error")
                         item_log(format_browser_diagnostic(exc.diagnostic), "error")
                         if attempt < max_retries:
                             item_log(f"Attempt {attempt} failed in Dola browser: {exc}. Retrying...", "warn")
@@ -512,7 +538,7 @@ async def process_video(session: Session, job: Job) -> None:
                             item_log(f"Attempt {attempt} failed for '{db_item.prompt[:40]}': {exc}. Retrying...", "warn")
                             if not await wait_before_retry(3):
                                 return
-                mark_item(session_local, db_item, ItemStatus.failed, "Failed", last_error)
+                mark_item(session_local, db_item, ItemStatus.failed, "Failed", last_error, diagnostic=last_diagnostic)
                 item_log(f"Item failed after {max_retries} attempts: {last_error}", "error")
             finally:
                 session_local.close()
@@ -520,7 +546,8 @@ async def process_video(session: Session, job: Job) -> None:
     try:
         await asyncio.gather(*[_run_item(item) for item in items])
     finally:
-        await client.aclose()
+        await submit_client.aclose()
+        await poll_client.aclose()
         await browser_client.close()
 
 
@@ -559,9 +586,9 @@ async def _resume_video_item_poll(job_id: UUID, item_id: UUID) -> None:
         session.commit()
         mark_item(session, item, ItemStatus.running, "Resume polling from saved browser session")
         log(session, f"[Resume poll | {item.id.hex[:8]}] Resume polling from saved browser session: chat_url={payload.get('chat_url') or snapshot.get('chat_url')}", "info", job.id)
+        log(session, f"[Resume poll | {item.id.hex[:8]}] Polling over direct HTTP (proxy disabled).", "info", job.id)
 
-        proxy_url = app_settings.get("proxy_url", "") if app_settings.get("proxy_enabled") else ""
-        client = DolaClient(app_settings.get("dola_auth_cookies", settings.dola_auth_cookies), settings.dola_default_region, proxy=proxy_url)
+        client = DolaClient(app_settings.get("dola_auth_cookies", settings.dola_auth_cookies), settings.dola_default_region)
 
         def record_raw_response(response_type: str, response_attempt: int, status_code: int, body: str) -> None:
             try:
