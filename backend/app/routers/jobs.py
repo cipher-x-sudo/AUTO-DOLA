@@ -23,6 +23,12 @@ from app.services.jobs import log
 router = APIRouter(prefix="/api/video", tags=["video"])
 
 
+def stable_job(job: Job) -> Job:
+    job.items = sorted(job.items, key=lambda item: (item.created_at, str(item.id)))
+    job.artifacts = sorted(job.artifacts, key=lambda artifact: (artifact.created_at, str(artifact.id)))
+    return job
+
+
 @router.post("/jobs", response_model=JobRead)
 def create_video_job(payload: VideoJobCreate, session: Session = Depends(get_session)) -> Job:
     job = Job(kind=JobKind.video, status=JobStatus.queued, title=f"Video batch ({len(payload.prompts)})", total=len(payload.prompts), config_json=payload.model_dump())
@@ -39,7 +45,8 @@ def create_video_job(payload: VideoJobCreate, session: Session = Depends(get_ses
 
 @router.get("/jobs", response_model=list[JobRead])
 def list_jobs(session: Session = Depends(get_session)) -> list[Job]:
-    return session.exec(select(Job).where(Job.kind == JobKind.video).options(selectinload(Job.items), selectinload(Job.artifacts)).order_by(Job.created_at.desc()).limit(100)).all()
+    jobs = session.exec(select(Job).where(Job.kind == JobKind.video).options(selectinload(Job.items), selectinload(Job.artifacts)).order_by(Job.created_at.desc()).limit(100)).all()
+    return [stable_job(job) for job in jobs]
 
 
 @router.delete("/jobs")
@@ -83,7 +90,7 @@ def get_job(job_id: UUID, session: Session = Depends(get_session)) -> Job:
     job = session.exec(select(Job).where(Job.id == job_id).options(selectinload(Job.items), selectinload(Job.artifacts))).first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    return job
+    return stable_job(job)
 
 
 @router.post("/jobs/{job_id}/cancel", response_model=JobRead)

@@ -9,6 +9,7 @@ export interface JobItem {
   error?: string | null
   diagnostic_json?: Record<string, unknown>
   artifact_id?: string | null
+  created_at: string
   updated_at: string
 }
 

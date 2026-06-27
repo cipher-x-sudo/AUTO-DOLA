@@ -5,6 +5,7 @@ import logging
 import shutil
 from pathlib import Path
 from typing import Callable
+from urllib.parse import urlparse
 from uuid import UUID
 
 import httpx
@@ -42,6 +43,13 @@ BROWSER_FALLBACK_ERROR_CODES = {710022002, 710022017}
 
 class JobCancelled(RuntimeError):
     """Raised inside a worker item when the user force-stops a job."""
+
+
+class DownloadError(RuntimeError):
+    def __init__(self, code: str, message: str, diagnostic: dict | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+        self.diagnostic = diagnostic or {}
 
 
 def should_fallback_to_browser(exc: DolaSubmissionError) -> bool:
@@ -107,7 +115,7 @@ async def process_video(session: Session, job: Job) -> None:
     submit_client = DolaClient(app_settings.get("dola_auth_cookies", settings.dola_auth_cookies), settings.dola_default_region, proxy=proxy_url)
     poll_client = DolaClient(app_settings.get("dola_auth_cookies", settings.dola_auth_cookies), settings.dola_default_region)
     browser_client = DolaBrowserClient(proxy_url=proxy_url)
-    items = session.exec(select(JobItem).where(JobItem.job_id == job.id)).all()
+    items = session.exec(select(JobItem).where(JobItem.job_id == job.id).order_by(JobItem.created_at.asc(), JobItem.id.asc())).all()
     item_numbers = {item.id: index + 1 for index, item in enumerate(items)}
     requested_parallel = config.get("parallel", 1)
     parallel = effective_video_parallel(requested_parallel)
@@ -171,29 +179,19 @@ async def process_video(session: Session, job: Job) -> None:
                     filename = unique_video_filename(output_dir, vid, db_item.title)
                     raw_path = output_dir / filename.replace(".mp4", "_raw.mp4")
                     final_path = output_dir / filename
-                    save_mode = str(config.get("save_mode") or "final").lower()
                     mark_item(session_local, db_item, ItemStatus.running, f"{action_prefix}Downloading MP4")
-                    await download_file(download_url, raw_path, cancel_fn=job_cancelled_or_missing)
+                    download_info = await download_file(download_url, raw_path, cancel_fn=job_cancelled_or_missing)
+                    item_log(f"Downloaded MP4 bytes={download_info['bytes_written']} path={raw_path}", "success")
                     ensure_not_cancelled(session_local, db_item.id)
-                    artifact_path = raw_path
-                    if save_mode == "raw":
-                        final_path.unlink(missing_ok=True)
-                        item_log(f"Saved raw video only: {raw_path.name}", "success")
-                    elif config.get("clean_watermark", True):
-                        mark_item(session_local, db_item, ItemStatus.running, f"{action_prefix}Cleaning watermark")
-                        if clean_video(raw_path, final_path):
-                            ensure_not_cancelled(session_local, db_item.id)
-                            artifact_path = final_path
-                            if save_mode != "both":
-                                raw_path.unlink(missing_ok=True)
-                        else:
-                            artifact_path = raw_path
-                            item_log("Watermark cleanup failed; using raw video as artifact.", "warn")
-                    else:
-                        shutil.copyfile(raw_path, final_path)
-                        artifact_path = final_path
-                        if save_mode != "both":
-                            raw_path.unlink(missing_ok=True)
+                    artifact_path = save_downloaded_video(
+                        raw_path,
+                        final_path,
+                        str(config.get("save_mode") or "final").lower(),
+                        bool(config.get("clean_watermark", True)),
+                        lambda message, level="info": item_log(message, level),
+                        lambda action: mark_item(session_local, db_item, ItemStatus.running, f"{action_prefix}{action}"),
+                    )
+                    ensure_not_cancelled(session_local, db_item.id)
                     artifact = Artifact(job_id=job.id, item_id=db_item.id, kind="video", path=str(artifact_path), filename=artifact_path.name, mime_type="video/mp4", size_bytes=artifact_path.stat().st_size)
                     add_artifact(session_local, artifact, db_item)
                     mark_item(session_local, db_item, ItemStatus.completed, artifact_path.name)
@@ -543,6 +541,13 @@ async def process_video(session: Session, job: Job) -> None:
                             item_log(f"Attempt {attempt} failed in Dola browser: {exc}. Retrying...", "warn")
                             if not await wait_before_retry(10):
                                 return
+                    except DownloadError as exc:
+                        last_error = str(exc)
+                        last_diagnostic = {"error_type": exc.code, **exc.diagnostic}
+                        mark_item(session_local, db_item, ItemStatus.failed, exc.code, last_error, diagnostic=last_diagnostic)
+                        item_log(last_error, "error")
+                        item_log(f"Download diagnostic: {last_diagnostic}", "error")
+                        return
                     except Exception as exc:
                         last_error = str(exc)
                         if attempt < max_retries:
@@ -639,25 +644,16 @@ async def _resume_video_item_poll(job_id: UUID, item_id: UUID) -> None:
         final_path = output_dir / filename
         save_mode = str(config.get("save_mode") or "final").lower()
         mark_item(session, item, ItemStatus.running, "Downloading MP4")
-        await download_file(download_url, raw_path)
-
-        artifact_path = raw_path
-        if save_mode == "raw":
-            final_path.unlink(missing_ok=True)
-            log(session, f"[Resume poll | {item.id.hex[:8]}] Saved raw video only: {raw_path.name}", "success", job.id)
-        elif config.get("clean_watermark", True):
-            mark_item(session, item, ItemStatus.running, "Cleaning watermark")
-            if clean_video(raw_path, final_path):
-                artifact_path = final_path
-                if save_mode != "both":
-                    raw_path.unlink(missing_ok=True)
-            else:
-                log(session, f"[Resume poll | {item.id.hex[:8]}] Watermark cleanup failed; using raw video as artifact.", "warn", job.id)
-        else:
-            shutil.copyfile(raw_path, final_path)
-            artifact_path = final_path
-            if save_mode != "both":
-                raw_path.unlink(missing_ok=True)
+        download_info = await download_file(download_url, raw_path)
+        log(session, f"[Resume poll | {item.id.hex[:8]}] Downloaded MP4 bytes={download_info['bytes_written']} path={raw_path}", "success", job.id)
+        artifact_path = save_downloaded_video(
+            raw_path,
+            final_path,
+            save_mode,
+            bool(config.get("clean_watermark", True)),
+            lambda message, level="info": log(session, f"[Resume poll | {item.id.hex[:8]}] {message}", level, job.id),
+            lambda action: mark_item(session, item, ItemStatus.running, action),
+        )
 
         artifact = Artifact(job_id=job.id, item_id=item.id, kind="video", path=str(artifact_path), filename=artifact_path.name, mime_type="video/mp4", size_bytes=artifact_path.stat().st_size)
         add_artifact(session, artifact, item)
@@ -683,7 +679,7 @@ async def process_images(session: Session, job: Job) -> None:
     config = job.config_json
     output_dir = Path(config.get("output_folder") or app_settings.get("output_dir") or settings.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    for item in session.exec(select(JobItem).where(JobItem.job_id == job.id)).all():
+    for item in session.exec(select(JobItem).where(JobItem.job_id == job.id).order_by(JobItem.created_at.asc(), JobItem.id.asc())).all():
         try:
             mark_item(session, item, ItemStatus.running, "Generating image")
             path = output_dir / safe_filename(f"image-{item.id.hex[:8]}", ".png")
@@ -699,7 +695,7 @@ async def process_tts(session: Session, job: Job) -> None:
     config = job.config_json
     output_dir = Path(config.get("output_folder") or settings.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    for item in session.exec(select(JobItem).where(JobItem.job_id == job.id)).all():
+    for item in session.exec(select(JobItem).where(JobItem.job_id == job.id).order_by(JobItem.created_at.asc(), JobItem.id.asc())).all():
         try:
             mark_item(session, item, ItemStatus.running, "Synthesizing speech")
             path = output_dir / safe_filename(f"tts-{item.id.hex[:8]}", ".mp3")
@@ -711,17 +707,114 @@ async def process_tts(session: Session, job: Job) -> None:
             mark_item(session, item, ItemStatus.failed, "Failed", str(exc))
 
 
-async def download_file(url: str, path: Path, cancel_fn: Callable[[], bool] | None = None) -> None:
-    async with httpx.AsyncClient(timeout=60, verify=False) as client:
-        async with client.stream("GET", url) as response:
-            response.raise_for_status()
-            with path.open("wb") as handle:
-                async for chunk in response.aiter_bytes():
-                    if cancel_fn and cancel_fn():
-                        path.unlink(missing_ok=True)
-                        raise JobCancelled("Force stopped")
-                    if chunk:
-                        handle.write(chunk)
+async def download_file(url: str, path: Path, cancel_fn: Callable[[], bool] | None = None) -> dict:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    part_path = path.with_name(f"{path.name}.part")
+    part_path.unlink(missing_ok=True)
+    path.unlink(missing_ok=True)
+    bytes_written = 0
+    status_code = 0
+    content_type = ""
+    content_length = ""
+    try:
+        async with httpx.AsyncClient(timeout=60, verify=False, follow_redirects=True) as client:
+            async with client.stream("GET", url) as response:
+                status_code = response.status_code
+                content_type = response.headers.get("content-type", "")
+                content_length = response.headers.get("content-length", "")
+                response.raise_for_status()
+                with part_path.open("wb") as handle:
+                    async for chunk in response.aiter_bytes():
+                        if cancel_fn and cancel_fn():
+                            raise JobCancelled("Force stopped")
+                        if chunk:
+                            handle.write(chunk)
+                            bytes_written += len(chunk)
+        if bytes_written <= 0 or not part_path.exists() or part_path.stat().st_size <= 0:
+            raise DownloadError(
+                "DOWNLOAD_EMPTY",
+                "MP4 download failed: downloaded file was empty.",
+                download_diagnostic(url, path, status_code, content_type, content_length, bytes_written, False),
+            )
+        part_path.replace(path)
+        if not path.exists():
+            raise DownloadError(
+                "DOWNLOAD_FILE_MISSING",
+                "MP4 download failed: raw file was not created.",
+                download_diagnostic(url, path, status_code, content_type, content_length, bytes_written, False),
+            )
+        return download_diagnostic(url, path, status_code, content_type, content_length, bytes_written, True)
+    except JobCancelled:
+        part_path.unlink(missing_ok=True)
+        path.unlink(missing_ok=True)
+        raise
+    except DownloadError:
+        part_path.unlink(missing_ok=True)
+        raise
+    except Exception as exc:
+        part_path.unlink(missing_ok=True)
+        raise DownloadError(
+            "DOWNLOAD_FAILED",
+            f"MP4 download failed: {exc}",
+            download_diagnostic(url, path, status_code, content_type, content_length, bytes_written, path.exists()),
+        ) from exc
+
+
+def download_diagnostic(url: str, path: Path, status_code: int, content_type: str, content_length: str, bytes_written: int, exists: bool) -> dict:
+    parsed = urlparse(url)
+    return {
+        "status_code": status_code,
+        "content_type": content_type,
+        "content_length": content_length,
+        "bytes_written": bytes_written,
+        "url_host": parsed.netloc,
+        "target_raw_path": str(path),
+        "raw_exists_after_download": exists,
+    }
+
+
+def ensure_video_file(path: Path, code: str) -> None:
+    if not path.exists() or path.stat().st_size <= 0:
+        raise DownloadError(code, f"MP4 save failed: expected file is missing or empty: {path}", {"path": str(path), "exists": path.exists()})
+
+
+def save_downloaded_video(
+    raw_path: Path,
+    final_path: Path,
+    save_mode: str,
+    clean_watermark_enabled: bool,
+    log_fn: Callable[[str, str], None],
+    mark_action: Callable[[str], None],
+) -> Path:
+    ensure_video_file(raw_path, "DOWNLOAD_FILE_MISSING")
+    artifact_path = raw_path
+    if save_mode == "raw":
+        final_path.unlink(missing_ok=True)
+        log_fn(f"Saved raw video only: {raw_path.name}", "success")
+        return raw_path
+    if clean_watermark_enabled:
+        mark_action("Cleaning watermark")
+        if clean_video(raw_path, final_path):
+            ensure_video_file(final_path, "FINAL_FILE_MISSING")
+            artifact_path = final_path
+            log_fn(f"Saved final video: {final_path.name}", "success")
+            if save_mode != "both":
+                raw_path.unlink(missing_ok=True)
+            return artifact_path
+        if raw_path.exists() and raw_path.stat().st_size > 0:
+            log_fn("Watermark cleanup failed; using raw video as artifact.", "warn")
+            return raw_path
+        if final_path.exists() and final_path.stat().st_size > 0:
+            log_fn("Watermark cleanup removed raw file; using final video artifact.", "warn")
+            return final_path
+        raise DownloadError("DOWNLOAD_FILE_MISSING", "MP4 download failed: raw file was not created.", {"raw_path": str(raw_path), "final_path": str(final_path)})
+    shutil.copyfile(raw_path, final_path)
+    ensure_video_file(final_path, "FINAL_FILE_MISSING")
+    artifact_path = final_path
+    log_fn(f"Saved final video: {final_path.name}", "success")
+    if save_mode != "both":
+        raw_path.unlink(missing_ok=True)
+    return artifact_path
 
 
 def unique_video_filename(output_dir: Path, vid: str, title: str = "") -> str:

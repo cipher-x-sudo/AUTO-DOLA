@@ -264,7 +264,7 @@ function VideoConsole({
   }, [])
 
   const stats = useMemo(() => {
-    const items = jobs.flatMap((job) => job.items)
+    const items = stableJobItems(jobs.flatMap((job) => job.items))
     return {
       total: items.length,
       queued: items.filter((item) => item.status === "queued").length,
@@ -280,7 +280,7 @@ function VideoConsole({
   const progressTotal = activeJob?.total || stats.total || 0
   const progressDone = activeJob ? activeJob.done + activeJob.failed : stats.done + stats.failed
   const progress = progressTotal ? Math.round((progressDone / progressTotal) * 100) : 0
-  const queueItems = activeJob?.items ?? jobs.flatMap((job) => job.items)
+  const queueItems = stableJobItems(activeJob?.items ?? jobs.flatMap((job) => job.items))
   const filteredLogs = logs
     .filter(isStudioLogVisible)
     .filter((row) => row.message.toLowerCase().includes(logSearch.toLowerCase()) || row.level.toLowerCase().includes(logSearch.toLowerCase()))
@@ -778,20 +778,21 @@ function GenerationQueue({
 }) {
   const [page, setPage] = useState(1)
   const [expandedItemId, setExpandedItemId] = useState<string | null>(null)
-  const pageCount = Math.max(1, Math.ceil(items.length / QUEUE_PAGE_SIZE))
+  const stableItems = useMemo(() => stableJobItems(items), [items])
+  const pageCount = Math.max(1, Math.ceil(stableItems.length / QUEUE_PAGE_SIZE))
   const safePage = Math.min(page, pageCount)
   const start = (safePage - 1) * QUEUE_PAGE_SIZE
-  const pageItems = items.slice(start, start + QUEUE_PAGE_SIZE)
+  const pageItems = stableItems.slice(start, start + QUEUE_PAGE_SIZE)
 
   useEffect(() => {
-    setPage((current) => Math.min(current, Math.max(1, Math.ceil(items.length / QUEUE_PAGE_SIZE))))
-  }, [items.length])
+    setPage((current) => Math.min(current, Math.max(1, Math.ceil(stableItems.length / QUEUE_PAGE_SIZE))))
+  }, [stableItems.length])
 
   return (
     <Card className="p-4">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <SectionTitle icon={<Zap size={15} />} title="Generation Queue" badge={items.length ? `${items.length} total` : undefined} />
-        {items.length > QUEUE_PAGE_SIZE && (
+        <SectionTitle icon={<Zap size={15} />} title="Generation Queue" badge={stableItems.length ? `${stableItems.length} total` : undefined} />
+        {stableItems.length > QUEUE_PAGE_SIZE && (
           <div className="flex items-center gap-2 text-xs font-bold text-muted-foreground">
             <Button variant="secondary" className="h-8 px-2 text-xs" onClick={() => setPage((current) => Math.max(1, current - 1))} disabled={safePage <= 1}>
               Prev
@@ -854,13 +855,13 @@ function GenerationQueue({
                 </Fragment>
               )
             })}
-            {!items.length && <tr><td className="px-3 py-5 text-center text-muted-foreground" colSpan={4}>No queued videos yet.</td></tr>}
+            {!stableItems.length && <tr><td className="px-3 py-5 text-center text-muted-foreground" colSpan={4}>No queued videos yet.</td></tr>}
           </tbody>
         </table>
       </div>
-      {items.length > QUEUE_PAGE_SIZE && (
+      {stableItems.length > QUEUE_PAGE_SIZE && (
         <div className="mt-3 text-right text-xs font-semibold text-muted-foreground">
-          Showing {start + 1}-{Math.min(start + QUEUE_PAGE_SIZE, items.length)} of {items.length}
+          Showing {start + 1}-{Math.min(start + QUEUE_PAGE_SIZE, stableItems.length)} of {stableItems.length}
         </div>
       )}
     </Card>
@@ -1637,6 +1638,14 @@ function collectVideoArtifacts(jobs: Job[]): VideoArtifact[] {
   )
 }
 
+function stableJobItems(items: JobItem[]): JobItem[] {
+  return [...items].sort((left, right) => {
+    const created = new Date(left.created_at).getTime() - new Date(right.created_at).getTime()
+    if (created !== 0) return created
+    return left.id.localeCompare(right.id)
+  })
+}
+
 function hasSavedBrowserSnapshot(snapshots: Array<Record<string, unknown>>, itemId: string): boolean {
   return snapshots.some((snapshot) =>
     snapshot.source === "browser"
@@ -1646,7 +1655,7 @@ function hasSavedBrowserSnapshot(snapshots: Array<Record<string, unknown>>, item
 }
 
 function buildEngineTelemetry(jobs: Job[], logs: LogRow[]): EngineTelemetryStats {
-  const items = jobs.flatMap((job) => job.items)
+  const items = stableJobItems(jobs.flatMap((job) => job.items))
   const stats: EngineTelemetryStats = {
     total: items.length,
     queued: items.filter((item) => item.status === "queued").length,

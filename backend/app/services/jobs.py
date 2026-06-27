@@ -35,7 +35,7 @@ def recompute_job(session: Session, job_id: UUID) -> Job:
     job = session.get(Job, job_id)
     if not job:
         raise ValueError(f"Job {job_id} not found")
-    items = session.exec(select(JobItem).where(JobItem.job_id == job_id)).all()
+    items = session.exec(select(JobItem).where(JobItem.job_id == job_id).order_by(JobItem.created_at.asc(), JobItem.id.asc())).all()
     job.total = len(items)
     job.done = len([i for i in items if i.status == ItemStatus.completed])
     job.failed = len([i for i in items if i.status == ItemStatus.failed])
