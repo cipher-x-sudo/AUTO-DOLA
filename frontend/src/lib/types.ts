@@ -32,6 +32,7 @@ export interface Job {
   failed: number
   config_json: Record<string, unknown>
   error?: string | null
+  dola_cookie_snapshots_json?: Array<Record<string, unknown>>
   items: JobItem[]
   artifacts: Artifact[]
 }

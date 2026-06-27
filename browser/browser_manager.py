@@ -51,48 +51,6 @@ def free_port() -> tuple[int, int]:
     raise RuntimeError("No browser slots available.")
 
 
-def proxy_extension(profile_dir: Path, proxy_url: str) -> Path | None:
-    if not proxy_url:
-        return None
-    parsed = urlparse(proxy_url)
-    if not parsed.username or not parsed.password or not parsed.hostname or not parsed.port:
-        return None
-    ext_dir = profile_dir / "proxy_auth_extension"
-    ext_dir.mkdir(parents=True, exist_ok=True)
-    manifest = {
-        "version": "1.0.0",
-        "manifest_version": 2,
-        "name": "AUTO-DOLA Proxy",
-        "permissions": ["proxy", "tabs", "unlimitedStorage", "storage", "<all_urls>", "webRequest", "webRequestBlocking"],
-        "background": {"scripts": ["background.js"], "persistent": True},
-        "minimum_chrome_version": "22.0.0",
-    }
-    background = f"""
-var config = {{
-  mode: "fixed_servers",
-  rules: {{
-    singleProxy: {{
-      scheme: "{parsed.scheme}",
-      host: "{parsed.hostname}",
-      port: parseInt({parsed.port})
-    }},
-    bypassList: ["localhost", "127.0.0.1"]
-  }}
-}};
-chrome.proxy.settings.set({{value: config, scope: "regular"}}, function() {{}});
-chrome.webRequest.onAuthRequired.addListener(
-  function(details) {{
-    return {{authCredentials: {{username: "{unquote(parsed.username)}", password: "{unquote(parsed.password)}"}}}};
-  }},
-  {{urls: ["<all_urls>"]}},
-  ["blocking"]
-);
-"""
-    (ext_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
-    (ext_dir / "background.js").write_text(background, encoding="utf-8")
-    return ext_dir
-
-
 def proxy_server_arg(proxy_url: str) -> str:
     if not proxy_url:
         return ""
@@ -100,6 +58,37 @@ def proxy_server_arg(proxy_url: str) -> str:
     if not parsed.scheme or not parsed.hostname:
         return ""
     return f"{parsed.scheme}://{parsed.hostname}:{parsed.port}" if parsed.port else f"{parsed.scheme}://{parsed.hostname}"
+
+
+def proxy_credentials(proxy_url: str) -> dict[str, str]:
+    parsed = urlparse(proxy_url)
+    if not parsed.username or not parsed.password:
+        return {}
+    return {
+        "username": unquote(parsed.username),
+        "password": unquote(parsed.password),
+    }
+
+
+def browser_launch_args(profile_dir: Path, port: int, x: int, y: int, proxy_url: str = "") -> list[str]:
+    args = [
+        "chromium",
+        "--remote-debugging-address=127.0.0.1",
+        f"--remote-debugging-port={port}",
+        f"--user-data-dir={profile_dir}",
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--no-first-run",
+        "--no-default-browser-check",
+        f"--window-size={WINDOW_WIDTH},{WINDOW_HEIGHT}",
+        f"--window-position={x},{y}",
+    ]
+    proxy_arg = proxy_server_arg(proxy_url)
+    if proxy_arg:
+        args.append(f"--proxy-server={proxy_arg}")
+    args.append("about:blank")
+    return args
 
 
 def wait_for_port(port: int, timeout: float = 20.0, host: str = "127.0.0.1") -> None:
@@ -122,27 +111,10 @@ def launch_slot(proxy_url: str = "") -> dict:
         slot_id = f"slot-{int(time.time() * 1000)}-{port}"
         profile_dir = BASE_PROFILE_DIR / "slots" / slot_id
         profile_dir.mkdir(parents=True, exist_ok=True)
-        ext_dir = proxy_extension(profile_dir, proxy_url)
+        credentials = proxy_credentials(proxy_url)
         x = ((slot_number - 1) % 5) * 40
         y = ((slot_number - 1) % 5) * 35
-        args = [
-            "chromium",
-            "--remote-debugging-address=127.0.0.1",
-            f"--remote-debugging-port={port}",
-            f"--user-data-dir={profile_dir}",
-            "--no-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-gpu",
-            "--no-first-run",
-            "--no-default-browser-check",
-            f"--window-size={WINDOW_WIDTH},{WINDOW_HEIGHT}",
-            f"--window-position={x},{y}",
-        ]
-        if ext_dir:
-            args.append(f"--load-extension={ext_dir}")
-        elif proxy_server_arg(proxy_url):
-            args.append(f"--proxy-server={proxy_server_arg(proxy_url)}")
-        args.extend(["--new-window", "https://www.dola.com/"])
+        args = browser_launch_args(profile_dir, port, x, y, proxy_url)
         log_file = (LOG_DIR / f"chromium-{slot_id}.log").open("ab")
         process = subprocess.Popen(args, stdout=log_file, stderr=log_file, env={**os.environ, "DISPLAY": DISPLAY})
         try:
@@ -174,6 +146,10 @@ def launch_slot(proxy_url: str = "") -> dict:
             "forward_pid": forward_process.pid,
             "proxy_active": bool(proxy_url),
             "proxy_host": public_proxy_host(proxy_url),
+            "proxy_auth_mode": "cdp" if credentials else ("none" if not proxy_url else "proxy-server"),
+            "proxy_username": credentials.get("username", ""),
+            "proxy_password": credentials.get("password", ""),
+            "launch_url": "about:blank",
             "started_at": time.time(),
             "process": process,
             "forward_process": forward_process,
@@ -181,7 +157,7 @@ def launch_slot(proxy_url: str = "") -> dict:
             "forward_log": forward_log,
         }
         SLOTS[slot_id] = slot
-        return public_slot(slot)
+        return connection_slot(slot)
 
 
 def close_slot(slot_id: str) -> bool:
@@ -223,7 +199,19 @@ def public_proxy_host(proxy_url: str) -> str:
 
 
 def public_slot(slot: dict) -> dict:
-    return {key: value for key, value in slot.items() if key not in {"process", "forward_process", "log_file", "forward_log"}}
+    return {
+        key: value
+        for key, value in slot.items()
+        if key not in {"process", "forward_process", "log_file", "forward_log", "proxy_username", "proxy_password"}
+    }
+
+
+def connection_slot(slot: dict) -> dict:
+    return {
+        **public_slot(slot),
+        "proxy_username": slot.get("proxy_username", ""),
+        "proxy_password": slot.get("proxy_password", ""),
+    }
 
 
 def status() -> dict:

@@ -32,6 +32,10 @@ def create_cookie_snapshot(
     dola_session: DolaSession,
     *,
     base_dir: Path | None = None,
+    source: str = "direct",
+    chat_url: str = "",
+    extra_metadata: dict[str, Any] | None = None,
+    extra_payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     cookie_header = dola_session.headers.get("cookie", "")
     cookie_names = cookie_names_from_header(cookie_header)
@@ -45,19 +49,26 @@ def create_cookie_snapshot(
         "attempt": attempt,
         "created_at": created_at.isoformat(),
         "cookie_header": cookie_header,
+        "headers": dola_session.headers,
+        "payload_template": dola_session.payload_template,
         "dola_url": dola_session.url,
         "dola_url_query": parse_qs(urlparse(dola_session.url).query),
         "fp": dola_session.fp,
         "has_ttwid": dola_session.has_ttwid,
         "has_hook_slardar": dola_session.has_hook_slardar,
         "has_auth_cookies": dola_session.has_auth_cookies,
+        "source": source,
+        "chat_url": chat_url,
     }
+    if extra_payload:
+        payload.update(extra_payload)
     path.write_text(encrypt_value(payload), encoding="utf-8")
     metadata = {
         "snapshot_id": snapshot_id,
         "job_id": str(job_id),
         "item_id": str(item_id),
         "attempt": attempt,
+        "source": source,
         "created_at": created_at.isoformat(),
         "encrypted_file_path": str(path),
         "cookie_sha256": hashlib.sha256(cookie_header.encode()).hexdigest(),
@@ -69,8 +80,11 @@ def create_cookie_snapshot(
         "region": settings.dola_default_region,
         "conversation_id_masked": None,
         "conversation_type": None,
+        "chat_url": chat_url,
         "raw_response_events": [],
     }
+    if extra_metadata:
+        metadata.update(extra_metadata)
     append_cookie_snapshot_metadata(session, job_id, metadata)
     return metadata
 
@@ -94,8 +108,68 @@ def mark_cookie_snapshot_conversation(session: Session, job_id: UUID, snapshot_i
             snapshot["conversation_id_masked"] = mask_conversation_id(conversation_id)
             snapshot["conversation_type"] = conversation_type
             snapshot["conversation_recorded_at"] = utcnow().isoformat()
+            payload = read_cookie_snapshot(snapshot)
+            payload["conversation_id"] = conversation_id
+            payload["conversation_type"] = conversation_type
+            Path(str(snapshot["encrypted_file_path"])).write_text(encrypt_value(payload), encoding="utf-8")
             break
     save_job_snapshots(session, job, snapshots)
+
+
+def update_cookie_snapshot(
+    session: Session,
+    job_id: UUID,
+    snapshot_id: str,
+    *,
+    metadata_updates: dict[str, Any] | None = None,
+    payload_updates: dict[str, Any] | None = None,
+) -> None:
+    job = session.get(Job, job_id)
+    if not job:
+        raise ValueError(f"Job {job_id} not found")
+    snapshots = list(job.dola_cookie_snapshots_json or [])
+    for snapshot in snapshots:
+        if snapshot.get("snapshot_id") == snapshot_id:
+            if metadata_updates:
+                snapshot.update(metadata_updates)
+            if payload_updates:
+                payload = read_cookie_snapshot(snapshot)
+                payload.update(payload_updates)
+                Path(str(snapshot["encrypted_file_path"])).write_text(encrypt_value(payload), encoding="utf-8")
+            break
+    else:
+        raise ValueError(f"Cookie snapshot {snapshot_id} not found for job {job_id}")
+    save_job_snapshots(session, job, snapshots)
+
+
+def latest_browser_snapshot_for_item(session: Session, job_id: UUID, item_id: UUID) -> dict[str, Any] | None:
+    snapshots = list_cookie_snapshot_metadata(session, job_id)
+    browser_snapshots = [
+        snapshot
+        for snapshot in snapshots
+        if snapshot.get("source") == "browser"
+        and str(snapshot.get("item_id")) == str(item_id)
+        and snapshot.get("conversation_type") is not None
+    ]
+    return browser_snapshots[-1] if browser_snapshots else None
+
+
+def dola_session_from_cookie_snapshot(metadata: dict[str, Any]) -> tuple[DolaSession, dict[str, Any]]:
+    payload = read_cookie_snapshot(metadata)
+    headers = dict(payload.get("headers") or {})
+    cookie_header = str(payload.get("cookie_header") or "")
+    if cookie_header:
+        headers["cookie"] = cookie_header
+    dola_session = DolaSession(
+        url=str(payload.get("dola_url") or ""),
+        headers=headers,
+        payload_template=dict(payload.get("payload_template") or {}),
+        fp=str(payload.get("fp") or ""),
+        has_ttwid=bool(payload.get("has_ttwid")),
+        has_hook_slardar=bool(payload.get("has_hook_slardar")),
+        has_auth_cookies=bool(payload.get("has_auth_cookies")),
+    )
+    return dola_session, payload
 
 
 def append_raw_response_event(
@@ -174,8 +248,10 @@ def mask_conversation_id(conversation_id: str) -> str:
 def redact_cookie_snapshot_payload(payload: dict[str, Any]) -> dict[str, Any]:
     redacted = dict(payload)
     cookie_header = str(redacted.pop("cookie_header", ""))
+    headers = dict(redacted.pop("headers", {}) or {})
     redacted["cookie_names"] = cookie_names_from_header(cookie_header)
     redacted["cookie_count"] = len(redacted["cookie_names"])
     redacted["cookie_sha256"] = hashlib.sha256(cookie_header.encode()).hexdigest()
+    redacted["header_names"] = sorted(headers)
     redacted["redacted_at"] = utcnow().isoformat()
     return redacted

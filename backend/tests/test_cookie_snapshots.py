@@ -6,7 +6,15 @@ from sqlmodel import Session, SQLModel, create_engine
 from app.config import settings
 from app.main import app
 from app.models import Job, JobKind, JobStatus
-from app.services.cookie_snapshots import append_raw_response_event, create_cookie_snapshot, mark_cookie_snapshot_conversation, read_cookie_snapshot
+from app.services.cookie_snapshots import (
+    append_raw_response_event,
+    create_cookie_snapshot,
+    dola_session_from_cookie_snapshot,
+    latest_browser_snapshot_for_item,
+    mark_cookie_snapshot_conversation,
+    read_cookie_snapshot,
+    update_cookie_snapshot,
+)
 from app.services.dola import DolaSession
 
 
@@ -41,6 +49,7 @@ def test_cookie_snapshot_encrypts_full_cookie_header_and_redacts_metadata(tmp_pa
 
         decrypted = read_cookie_snapshot(metadata)
         assert decrypted["cookie_header"] == "i18next=en; sid=secret-session; ttwid=fresh-public"
+        assert decrypted["headers"]["cookie"] == "i18next=en; sid=secret-session; ttwid=fresh-public"
 
 
 def test_cookie_snapshot_persists_conversation_and_raw_response_metadata(tmp_path: Path) -> None:
@@ -77,6 +86,85 @@ def test_cookie_snapshot_persists_conversation_and_raw_response_metadata(tmp_pat
 
         decrypted = read_cookie_snapshot(stored)
         assert decrypted["raw_response_events"][0]["body"] == '{"code":0,"data":{"vid":"abc_123"}}'
+        assert decrypted["conversation_id"] == "1821544108913"
+
+
+def test_browser_cookie_snapshot_can_reconstruct_dola_session(tmp_path: Path) -> None:
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        job = Job(kind=JobKind.video, status=JobStatus.running, title="Video batch (1)")
+        session.add(job)
+        session.commit()
+        session.refresh(job)
+
+        metadata = create_cookie_snapshot(
+            session,
+            job.id,
+            job.id,
+            1,
+            sample_dola_session(),
+            base_dir=tmp_path,
+            source="browser",
+            chat_url="https://www.dola.com/chat/1821544108913",
+            extra_metadata={"submit_url": "https://www.dola.com/chat/completion?fp=verify_test"},
+            extra_payload={"submit_url": "https://www.dola.com/chat/completion?fp=verify_test"},
+        )
+        mark_cookie_snapshot_conversation(session, job.id, metadata["snapshot_id"], "1821544108913", 3)
+
+        latest = latest_browser_snapshot_for_item(session, job.id, job.id)
+        assert latest is not None
+        assert latest["source"] == "browser"
+        assert latest["chat_url"] == "https://www.dola.com/chat/1821544108913"
+
+        restored, payload = dola_session_from_cookie_snapshot(latest)
+        assert restored.url == "https://www.dola.com/chat/completion?region=BD&fp=verify_test"
+        assert restored.headers["cookie"] == "i18next=en; sid=secret-session; ttwid=fresh-public"
+        assert payload["conversation_id"] == "1821544108913"
+
+
+def test_update_cookie_snapshot_persists_browser_ready_metadata(tmp_path: Path) -> None:
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        job = Job(kind=JobKind.video, status=JobStatus.running, title="Video batch (1)")
+        session.add(job)
+        session.commit()
+        session.refresh(job)
+
+        metadata = create_cookie_snapshot(
+            session,
+            job.id,
+            job.id,
+            1,
+            sample_dola_session(),
+            base_dir=tmp_path,
+            source="browser",
+            chat_url="https://www.dola.com/chat/1821544108913",
+        )
+        update_cookie_snapshot(
+            session,
+            job.id,
+            metadata["snapshot_id"],
+            metadata_updates={
+                "browser_ready_detected": True,
+                "download_captured_from": "browser_ready_card",
+                "vid": "video_abc",
+                "has_download_url": True,
+            },
+            payload_updates={"download_url": "https://example.com/video.mp4"},
+        )
+
+        session.expire_all()
+        reloaded = session.get(Job, job.id)
+        assert reloaded is not None
+        stored = reloaded.dola_cookie_snapshots_json[0]
+        assert stored["browser_ready_detected"] is True
+        assert stored["download_captured_from"] == "browser_ready_card"
+        assert stored["vid"] == "video_abc"
+
+        decrypted = read_cookie_snapshot(stored)
+        assert decrypted["download_url"] == "https://example.com/video.mp4"
 
 
 def test_admin_cookie_snapshot_endpoint_requires_token(tmp_path: Path) -> None:
@@ -105,3 +193,5 @@ def test_admin_cookie_snapshot_endpoint_requires_token(tmp_path: Path) -> None:
     body = allowed.json()
     assert body["snapshot"]["cookie_header"] == "i18next=en; sid=secret-session; ttwid=fresh-public"
     assert body["redacted"]["cookie_names"] == ["i18next", "sid", "ttwid"]
+    assert "headers" not in body["redacted"]
+    assert "cookie" in body["redacted"]["header_names"]

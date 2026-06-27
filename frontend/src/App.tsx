@@ -296,6 +296,17 @@ function VideoConsole({
     }
   }
 
+  async function resumePoll(itemId: string) {
+    if (!activeJob) return
+    try {
+      await api.resumeVideoItemPoll(activeJob.id, itemId)
+      toast.success("Resume poll queued")
+      onRefresh()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to queue resume poll")
+    }
+  }
+
   async function saveProxySettings() {
     setSavingProxy(true)
     try {
@@ -378,7 +389,11 @@ function VideoConsole({
             onStart={submit}
             onStop={stopGeneration}
           />
-          <GenerationQueue items={queueItems} />
+          <GenerationQueue
+            items={queueItems}
+            snapshots={activeJob?.dola_cookie_snapshots_json ?? []}
+            onResumePoll={resumePoll}
+          />
         </div>
 
         <div className="space-y-4">
@@ -591,7 +606,15 @@ function PromptsPanel({ promptText, setPromptText, count }: { promptText: string
   )
 }
 
-function GenerationQueue({ items }: { items: JobItem[] }) {
+function GenerationQueue({
+  items,
+  snapshots,
+  onResumePoll,
+}: {
+  items: JobItem[]
+  snapshots: Array<Record<string, unknown>>
+  onResumePoll: (itemId: string) => void
+}) {
   const [page, setPage] = useState(1)
   const pageCount = Math.max(1, Math.ceil(items.length / QUEUE_PAGE_SIZE))
   const safePage = Math.min(page, pageCount)
@@ -629,14 +652,26 @@ function GenerationQueue({ items }: { items: JobItem[] }) {
             </tr>
           </thead>
           <tbody>
-            {pageItems.map((item, index) => (
-              <tr key={item.id} className="border-t border-border">
-                <td className="px-3 py-3 text-muted-foreground">{start + index + 1}</td>
-                <td className="max-w-[320px] truncate px-3 py-3 font-bold">{item.prompt}</td>
-                <td className="px-3 py-3"><Badge tone={tone(item.status)}>{item.status}</Badge></td>
-                <td className="max-w-[520px] truncate px-3 py-3 text-muted-foreground">{item.error || item.action || "Waiting..."}</td>
-              </tr>
-            ))}
+            {pageItems.map((item, index) => {
+              const canResume = hasSavedBrowserSnapshot(snapshots, item.id) && !item.artifact_id
+              return (
+                <tr key={item.id} className="border-t border-border">
+                  <td className="px-3 py-3 text-muted-foreground">{start + index + 1}</td>
+                  <td className="max-w-[320px] truncate px-3 py-3 font-bold">{item.prompt}</td>
+                  <td className="px-3 py-3"><Badge tone={tone(item.status)}>{item.status}</Badge></td>
+                  <td className="max-w-[520px] px-3 py-3 text-muted-foreground">
+                    <div className="flex items-center gap-2">
+                      <span className="min-w-0 flex-1 truncate">{item.error || item.action || "Waiting..."}</span>
+                      {canResume && (
+                        <Button variant="secondary" className="h-7 shrink-0 px-2 text-[11px]" onClick={() => onResumePoll(item.id)}>
+                          Resume Poll
+                        </Button>
+                      )}
+                    </div>
+                  </td>
+                </tr>
+              )
+            })}
             {!items.length && <tr><td className="px-3 py-5 text-center text-muted-foreground" colSpan={4}>No queued videos yet.</td></tr>}
           </tbody>
         </table>
@@ -1266,15 +1301,19 @@ function EngineTelemetry({ stats, state }: { stats: EngineTelemetryStats; state:
     { key: "highDemand", label: "High Demand", tone: "amber" },
     { key: "dolaPolicy", label: "Dola Policy", tone: "pink" },
     { key: "noTextbox", label: "No Textbox", tone: "violet" },
-    { key: "browserEc", label: "Browser EC", tone: "red" },
-    { key: "noExport", label: "No Export", tone: "amber" },
+    { key: "browserEc", label: "Browser Error", tone: "red" },
+    { key: "noExport", label: "Download/Export Error", tone: "amber" },
   ]
   const stateClass = state === "READY" ? "text-emerald-300" : state === "RUNNING" ? "text-amber-300" : "text-red-300"
+  const hasTelemetry = Object.values(stats).some((value) => value > 0)
 
   return (
     <Card className="bg-[#17172a] p-4">
       <div className="mb-3 flex items-center justify-between gap-3">
-        <div className="text-[10px] font-black uppercase tracking-[0.32em] text-amber-200">Engine Telemetry</div>
+        <div>
+          <div className="text-[10px] font-black uppercase tracking-[0.32em] text-amber-200">Engine Telemetry</div>
+          {!hasTelemetry && <div className="mt-1 text-[11px] font-semibold text-muted-foreground">No telemetry yet</div>}
+        </div>
         <div className={`text-[10px] font-black uppercase tracking-wide ${stateClass}`}>- {state}</div>
       </div>
       <div className="grid grid-cols-2 gap-2 md:grid-cols-3 xl:grid-cols-6">
@@ -1367,6 +1406,14 @@ function collectVideoArtifacts(jobs: Job[]): VideoArtifact[] {
     job.artifacts
       .filter((artifact) => artifact.kind === "video" && artifact.mime_type === "video/mp4")
       .map((artifact) => ({ artifact, job })),
+  )
+}
+
+function hasSavedBrowserSnapshot(snapshots: Array<Record<string, unknown>>, itemId: string): boolean {
+  return snapshots.some((snapshot) =>
+    snapshot.source === "browser"
+    && snapshot.item_id === itemId
+    && Boolean(snapshot.conversation_type),
   )
 }
 

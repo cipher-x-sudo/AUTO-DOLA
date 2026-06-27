@@ -14,7 +14,7 @@ from app.database import get_session
 from app.config import settings
 from app.events import hub, job_channel
 from app.models import Artifact, Job, JobItem, JobKind, JobStatus, LogEvent, utcnow
-from app.queue import enqueue_job
+from app.queue import enqueue_job, get_queue
 from app.schemas import JobRead, VideoJobCreate
 from app.services.cookie_snapshots import list_cookie_snapshot_metadata, read_cookie_snapshot, redact_cookie_snapshot_payload
 from app.services.jobs import log
@@ -100,6 +100,31 @@ def cancel_job(job_id: UUID, session: Session = Depends(get_session)) -> Job:
     session.commit()
     log(session, "Force stop requested. Worker will stop active polling/downloads and skip queued items.", "warn", job.id)
     return get_job(job_id, session)
+
+
+@router.post("/jobs/{job_id}/items/{item_id}/resume-poll")
+def resume_item_poll(job_id: UUID, item_id: UUID, session: Session = Depends(get_session)) -> dict[str, str | bool]:
+    job = get_job(job_id, session)
+    item = next((job_item for job_item in job.items if job_item.id == item_id), None)
+    if not item:
+        raise HTTPException(status_code=404, detail="Video item not found")
+    snapshots = list_cookie_snapshot_metadata(session, job_id)
+    has_browser_snapshot = any(
+        snapshot.get("source") == "browser"
+        and str(snapshot.get("item_id")) == str(item_id)
+        and snapshot.get("conversation_type") is not None
+        for snapshot in snapshots
+    )
+    if not has_browser_snapshot:
+        raise HTTPException(status_code=409, detail="No saved browser session exists for this video item")
+    if settings.auto_dola_inline_worker:
+        from app.worker import resume_video_item_poll
+
+        resume_video_item_poll(str(job_id), str(item_id))
+    else:
+        get_queue().enqueue("app.worker.resume_video_item_poll", str(job_id), str(item_id), job_timeout="6h", result_ttl=86400)
+    log(session, f"Resume poll queued for video item {item_id}.", "info", job.id)
+    return {"ok": True, "queued": True}
 
 
 @router.get("/jobs/{job_id}/events")

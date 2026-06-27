@@ -46,6 +46,36 @@ VIDEO_MODE_SELECTORS = (
     "span:has-text('Video')",
     "text='Video'",
 )
+
+DURATION_PATCH_SCRIPT = r"""
+(() => {
+    if (window.__autoDolaDurationPatchInstalled) return;
+    window.__autoDolaDurationPatchInstalled = true;
+    window.__autoDolaDurationPatchApplied = false;
+    const originalStringify = JSON.stringify;
+    JSON.stringify = function(value, replacer, space) {
+        try {
+            if (value && typeof value === 'object') {
+                let str = originalStringify.apply(this, [value, replacer, space]);
+                if (
+                    str.includes('"duration":10') || str.includes('\\"duration\\":10') || str.includes('\\"duration\\": 10') ||
+                    str.includes('"duration":5') || str.includes('\\"duration\\":5') || str.includes('\\"duration\\": 5')
+                ) {
+                    window.__autoDolaDurationPatchApplied = true;
+                    str = str.replace(/"duration"\s*:\s*(10|5)/g, '"duration":15');
+                    str = str.replace(/\\"duration\\"\s*:\s*(10|5)/g, '\\"duration\\":15');
+                    return str;
+                }
+            }
+        } catch (e) {
+            console.error("AUTO-DOLA duration patch error:", e);
+        }
+        return originalStringify.apply(this, [value, replacer, space]);
+    };
+})();
+"""
+
+
 @dataclass
 class BrowserNetworkState:
     conversation_id: str | None = None
@@ -61,6 +91,12 @@ class BrowserNetworkState:
     captured_headers: dict[str, str] = field(default_factory=dict)
     captured_url: str = ""
     captured_method: str = ""
+    requested_duration: int | None = None
+    visible_duration: int | None = None
+    captured_duration: int | None = None
+    captured_ratio: str = ""
+    duration_patch_expected: bool = False
+    duration_patch_applied: bool = False
 
 
 @dataclass
@@ -69,6 +105,8 @@ class DolaBrowserSubmitResult:
     conversation_id: str
     conversation_type: int
     diagnostic: dict[str, Any]
+    chat_url: str = ""
+    submit_url: str = ""
     slot_id: str = ""
 
 
@@ -123,11 +161,51 @@ class DolaBrowserClient:
             cdp_url = resolve_cdp_url(str(slot.get("container_cdp_url") or slot.get("cdp_url")))
             browser = await playwright.chromium.connect_over_cdp(cdp_url)
             context = browser.contexts[0] if browser.contexts else await browser.new_context()
-            return {"slot": slot, "playwright": playwright, "browser": browser, "context": context}
+            runtime = {"slot": slot, "playwright": playwright, "browser": browser, "context": context}
+            await self._install_proxy_auth_handlers(context, slot, runtime)
+            return runtime
         except Exception:
             await playwright.stop()
             await self.close_slot(str(slot.get("slot_id") or ""))
             raise
+
+    async def _install_proxy_auth_handlers(self, context: BrowserContext, slot: dict[str, Any], runtime: dict[str, Any]) -> None:
+        username = str(slot.get("proxy_username") or "")
+        password = str(slot.get("proxy_password") or "")
+        if not username or not password:
+            runtime["proxy_auth_mode"] = str(slot.get("proxy_auth_mode") or "")
+            return
+        sessions: list[Any] = []
+
+        async def install_for_page(page: Page) -> None:
+            session = await context.new_cdp_session(page)
+            sessions.append(session)
+
+            async def on_auth_required(event: dict[str, Any]) -> None:
+                await session.send(
+                    "Fetch.continueWithAuth",
+                    {
+                        "requestId": event["requestId"],
+                        "authChallengeResponse": {
+                            "response": "ProvideCredentials",
+                            "username": username,
+                            "password": password,
+                        },
+                    },
+                )
+
+            async def on_request_paused(event: dict[str, Any]) -> None:
+                await session.send("Fetch.continueRequest", {"requestId": event["requestId"]})
+
+            session.on("Fetch.authRequired", lambda event: asyncio.create_task(on_auth_required(event)))
+            session.on("Fetch.requestPaused", lambda event: asyncio.create_task(on_request_paused(event)))
+            await session.send("Fetch.enable", {"handleAuthRequests": True})
+
+        for page in context.pages:
+            await install_for_page(page)
+        context.on("page", lambda page: asyncio.create_task(install_for_page(page)))
+        runtime["proxy_auth_mode"] = "cdp"
+        runtime["proxy_auth_sessions"] = sessions
 
     async def close_slot(self, slot_id: str) -> bool:
         runtime = self._active_slots.pop(slot_id, None)
@@ -230,7 +308,15 @@ class DolaBrowserClient:
             if log_fn:
                 log_fn(f"Browser slot {slot.get('slot_number')} connected", "info")
             context = runtime["context"]
-            page = await self.new_job_page(context)
+            initial_page_count = len(context.pages)
+            page = await self.new_patched_job_page(context, int(duration), network)
+            final_page_count = len(context.pages)
+            closed_blank_pages = max(0, initial_page_count - final_page_count)
+            if log_fn:
+                log_fn("Browser slot launched on about:blank", "info")
+                if runtime.get("proxy_auth_mode") == "cdp":
+                    log_fn("Proxy auth handled through CDP", "info")
+                log_fn(f"Closed extra blank tabs: {closed_blank_pages}", "info")
             page.on("request", lambda request: self._capture_request(request, network))
             page.on("response", lambda response: asyncio.create_task(self._capture_response(response, network)))
             if log_fn:
@@ -246,6 +332,9 @@ class DolaBrowserClient:
             result.slot_id = slot_id
             result.diagnostic["slot_id"] = slot_id
             result.diagnostic["slot_number"] = slot.get("slot_number")
+            result.diagnostic["initial_page_count"] = initial_page_count
+            result.diagnostic["final_page_count"] = final_page_count
+            result.diagnostic["closed_blank_pages"] = closed_blank_pages
             if log_fn:
                 log_fn("Captured browser session", "success")
             return result
@@ -255,9 +344,28 @@ class DolaBrowserClient:
         except Exception as exc:
             screenshot_path = await self._screenshot(page, "browser-failure") if page else ""
             await self._close_failed_submit_slot(slot_id, log_fn)
+            diagnostic = self._diagnostic(page, network, screenshot_path=screenshot_path) if page else {
+                "cdp": False,
+                "page_url": "",
+                "manual_url": self.manual_url,
+                "endpoint": network.last_endpoint,
+                "status_code": network.last_status,
+                "error_code": network.error_code,
+                "error_msg": network.error_msg,
+                "body_snippet": network.last_body_snippet,
+                "conversation_id": mask_id(network.conversation_id),
+                "vid": mask_id(network.vid),
+                "has_download_url": bool(network.download_url),
+                "captured_request": network.captured_request,
+                "captured_endpoint": endpoint_name(network.captured_url),
+                "cookie_names": [],
+                "screenshot_path": screenshot_path,
+                "browser_proxy_active": bool(self.proxy_url),
+                "browser_proxy_host": proxy_public_host(self.proxy_url),
+            }
             raise DolaBrowserError(
                 f"Dola browser failed: {exc}",
-                self._diagnostic(page, network, screenshot_path=screenshot_path),
+                diagnostic,
             ) from exc
 
     async def _close_failed_submit_slot(self, slot_id: str, log_fn: Any | None = None) -> None:
@@ -277,6 +385,22 @@ class DolaBrowserClient:
         log_fn: Any | None = None,
         timeout_seconds: int = 240,
     ) -> DolaBrowserDownloadResult:
+        return await self.wait_for_ready_video_download(
+            conversation_id,
+            slot_id=slot_id,
+            log_fn=log_fn,
+            timeout_seconds=timeout_seconds,
+        )
+
+    async def wait_for_ready_video_download(
+        self,
+        conversation_id: str,
+        *,
+        slot_id: str = "",
+        log_fn: Any | None = None,
+        timeout_seconds: int = 240,
+        poll_attempt_label: str = "",
+    ) -> DolaBrowserDownloadResult:
         page = await self._slot_page(slot_id, conversation_id) if slot_id else await self._page_for_conversation(await self.connect(), conversation_id)
         network = BrowserNetworkState(conversation_id=conversation_id)
         page.on("response", lambda response: asyncio.create_task(self._capture_response(response, network)))
@@ -284,8 +408,11 @@ class DolaBrowserClient:
         while time.monotonic() < deadline:
             if network.error_code:
                 raise DolaBrowserError(self._message_for_error(network), self._diagnostic(page, network))
+            await self._dismiss_modal_overlays(page)
             direct_src = await self._video_src_from_dom(page)
             if direct_src:
+                if log_fn:
+                    log_fn("Browser says video ready.", "success")
                 return DolaBrowserDownloadResult(
                     download_url=direct_src,
                     vid=vid_from_download_url(direct_src) or f"browser-{conversation_id[-8:]}",
@@ -293,7 +420,9 @@ class DolaBrowserClient:
                 )
             if await self._click_ready_video_card(page):
                 if log_fn:
+                    log_fn("Browser says video ready.", "success")
                     log_fn("Opened ready Dola video card to capture play_info.", "info")
+                    log_fn("Capturing play_info from browser ready card.", "info")
                 await page.wait_for_timeout(3_000)
                 direct_src = await self._video_src_from_dom(page)
                 if direct_src:
@@ -308,6 +437,8 @@ class DolaBrowserClient:
                         vid=network.vid or vid_from_download_url(network.download_url) or f"browser-{conversation_id[-8:]}",
                         diagnostic=self._diagnostic(page, network),
                     )
+            if log_fn and poll_attempt_label:
+                log_fn(f"Waiting for browser ready card during {poll_attempt_label}.", "debug")
             await asyncio.sleep(3)
         screenshot_path = await self._screenshot(page, "download-not-found")
         raise DolaBrowserError("Dola browser did not expose play_info URL.", self._diagnostic(page, network, screenshot_path=screenshot_path))
@@ -322,9 +453,33 @@ class DolaBrowserClient:
 
     async def new_job_page(self, context: BrowserContext | None = None) -> Page:
         context = context or await self.connect()
-        page = await context.new_page()
+        page = await self._allocate_job_page(context)
         await page.goto(DOLA_CREATE_IMAGE_URL, wait_until="domcontentloaded", timeout=BROWSER_TIMEOUT_MS)
         return page
+
+    async def _allocate_job_page(self, context: BrowserContext) -> Page:
+        blank_pages: list[Page] = []
+        for page in list(context.pages):
+            page_url = str(page.url or "")
+            if page_url in {"", "about:blank"} or page_url.startswith("chrome://new-tab-page"):
+                blank_pages.append(page)
+        if blank_pages:
+            page = blank_pages[0]
+            for extra_page in blank_pages[1:]:
+                try:
+                    await extra_page.close()
+                except Exception:
+                    pass
+            return page
+        return await context.new_page()
+
+    async def new_patched_job_page(self, context: BrowserContext, duration: int, network: BrowserNetworkState) -> Page:
+        network.requested_duration = int(duration)
+        network.visible_duration = browser_visible_duration(duration)
+        network.duration_patch_expected = int(duration) == 15
+        if network.duration_patch_expected:
+            await context.add_init_script(DURATION_PATCH_SCRIPT)
+        return await self.new_job_page(context)
 
     async def _page_for_conversation(self, context: BrowserContext, conversation_id: str) -> Page:
         for page in context.pages:
@@ -354,6 +509,7 @@ class DolaBrowserClient:
 
     async def _submit_via_ui(self, page: Page, prompt: str) -> None:
         await self._dismiss_cookie_banner(page)
+        await self._dismiss_modal_overlays(page)
         input_locator = None
         for selector in CHAT_INPUT_SELECTORS:
             try:
@@ -372,12 +528,17 @@ class DolaBrowserClient:
             screenshot_path = await self._screenshot(page, "input-not-found")
             raise DolaBrowserError("Dola chat input not found.", self._diagnostic(page, BrowserNetworkState(), screenshot_path=screenshot_path))
 
-        await input_locator.click(timeout=10_000)
+        await input_locator.click(force=True, timeout=10_000)
+        await page.wait_for_timeout(500)
         try:
-            await input_locator.fill(prompt, timeout=5_000)
-        except PlaywrightError:
             await page.keyboard.press("Control+A")
+            await page.keyboard.press("Backspace")
+            await page.keyboard.insert_text(prompt)
+        except PlaywrightError:
             await page.keyboard.type(prompt, delay=1)
+        await page.wait_for_timeout(500)
+        await page.keyboard.press("Enter")
+        await page.wait_for_timeout(800)
 
         send_candidates = (
             "button[type='submit']",
@@ -390,11 +551,10 @@ class DolaBrowserClient:
             button = page.locator(selector).last
             try:
                 if await button.count() and await button.is_visible(timeout=1_500) and await button.is_enabled(timeout=1_500):
-                    await button.click(timeout=5_000)
+                    await button.click(force=True, timeout=5_000)
                     return
             except PlaywrightError:
                 continue
-        await page.keyboard.press("Enter")
 
     async def _select_video_mode(self, page: Page) -> None:
         for selector in VIDEO_MODE_SELECTORS:
@@ -417,11 +577,56 @@ class DolaBrowserClient:
             except PlaywrightError:
                 continue
 
+    async def _dismiss_modal_overlays(self, page: Page) -> None:
+        try:
+            await page.keyboard.press("Escape")
+            await page.wait_for_timeout(300)
+        except Exception:
+            pass
+        close_selectors = (
+            ".semi-modal-close",
+            ".semi-modal .semi-icon-close",
+            ".semi-modal [class*=close]",
+            "[role='dialog'] [class*=close]",
+            "[class*=modal] [class*=close]",
+            "[class*=Modal] [class*=close]",
+            ".semi-modal button:has-text('Close')",
+            ".semi-modal button:has-text('Cancel')",
+            ".semi-modal button:has-text('Not now')",
+            "[role='dialog'] button:has-text('Close')",
+            "[role='dialog'] button:has-text('Cancel')",
+            "[role='dialog'] button:has-text('Not now')",
+            "button[aria-label='Close']",
+            "[aria-label='Close']",
+            "svg[aria-label='Close']",
+            "button:has-text('Got it')",
+            "button:has-text('Maybe later')",
+            "button:has-text('Skip')",
+        )
+        for selector in close_selectors:
+            try:
+                locator = page.locator(selector).last
+                if await locator.count() and await locator.is_visible(timeout=500):
+                    await locator.click(force=True, timeout=1_500)
+                    await page.wait_for_timeout(300)
+            except Exception:
+                continue
+
     async def _click_ready_video_card(self, page: Page) -> bool:
         body = (await page.locator("body").inner_text(timeout=5_000)).lower()
-        if "your video is ready" not in body and not await page.locator("img[class*=cover]").count():
+        if "your video is ready" not in body and not await page.locator("img[class*=cover], video, [class*=video]").count():
             return False
-        for selector in (".video-player-wrapper-IZ7Zoq", "[class*=video-player-wrapper]", "[class*=play-icon-wrapper]", "[class*=block-video]", "img[class*=cover]"):
+        for selector in (
+            "text='Your video is ready'",
+            ".video-player-wrapper-IZ7Zoq",
+            "[class*=video-player-wrapper]",
+            "[class*=play-icon-wrapper]",
+            "[class*=block-video]",
+            "[class*=video]",
+            "[class*=cover]",
+            "img[class*=cover]",
+            "video",
+        ):
             locator = page.locator(selector).first
             try:
                 if await locator.count() and await locator.is_visible(timeout=1_000):
@@ -451,11 +656,17 @@ class DolaBrowserClient:
                 session = await self._build_dola_session_from_browser(context, network)
                 if not network.conversation_id:
                     network.conversation_id = conversation_id
+                chat_url = page.url if conversation_id in page.url else f"{DOLA_CHAT_URL}{conversation_id}"
+                diagnostic = self._diagnostic(page, network)
+                diagnostic["chat_url"] = chat_url
+                diagnostic["submit_url"] = network.captured_url
                 return DolaBrowserSubmitResult(
                     session=session,
                     conversation_id=conversation_id,
                     conversation_type=network.conversation_type,
-                    diagnostic=self._diagnostic(page, network),
+                    diagnostic=diagnostic,
+                    chat_url=chat_url,
+                    submit_url=network.captured_url,
                 )
             await asyncio.sleep(2)
         raise DolaBrowserError("Dola browser submitted but conversation_id was not captured.", self._diagnostic(page, network))
@@ -486,6 +697,11 @@ class DolaBrowserClient:
     def _capture_request(self, request: Any, network: BrowserNetworkState) -> None:
         if "/chat/completion" not in request.url:
             return
+        post_data = request.post_data or ""
+        duration, ratio = extract_duration_and_ratio_from_post_data(post_data)
+        network.captured_duration = duration
+        network.captured_ratio = ratio
+        network.duration_patch_applied = bool(network.duration_patch_expected and duration == network.requested_duration)
         network.captured_url = request.url
         network.captured_method = request.method
         network.captured_headers = dict(request.headers)
@@ -493,7 +709,11 @@ class DolaBrowserClient:
             "url": request.url,
             "method": request.method,
             "headers": redact_headers(request.headers),
-            "post_data_snippet": sanitize_dola_log_message((request.post_data or "")[:500]),
+            "post_data_snippet": sanitize_dola_log_message(post_data[:500]),
+            "duration": duration,
+            "ratio": ratio,
+            "duration_patch_expected": network.duration_patch_expected,
+            "duration_patch_applied": network.duration_patch_applied,
         }
 
     async def _capture_response(self, response: Any, network: BrowserNetworkState) -> None:
@@ -565,6 +785,12 @@ class DolaBrowserClient:
             "has_download_url": bool(network.download_url),
             "captured_request": network.captured_request,
             "captured_endpoint": endpoint_name(network.captured_url),
+            "requested_duration": network.requested_duration,
+            "visible_duration": network.visible_duration,
+            "captured_duration": network.captured_duration,
+            "captured_ratio": network.captured_ratio,
+            "duration_patch_expected": network.duration_patch_expected,
+            "duration_patch_applied": network.duration_patch_applied,
             "cookie_names": cookie_names_from_header(network.captured_headers.get("cookie", "")),
             "screenshot_path": screenshot_path,
             "browser_proxy_active": bool(self.proxy_url),
@@ -590,8 +816,28 @@ def json_loads_or_empty(text: str) -> dict[str, Any]:
     return loaded if isinstance(loaded, dict) else {}
 
 
+def browser_visible_duration(duration: int) -> int:
+    return 10 if int(duration) == 15 else int(duration)
+
+
 def build_browser_video_prompt_text(prompt: str, duration: int, ratio: str) -> str:
-    return build_video_prompt_text(prompt, int(duration), ratio)
+    visible_duration = browser_visible_duration(duration)
+    clean_prompt = re.sub(r"(?i)^generate\s+image\s*:\s*", "", prompt).strip()
+    clean_prompt = re.sub(r"(?i)generate\s+image", "Generate video", clean_prompt)
+    if int(duration) == 15:
+        clean_prompt = re.sub(r"(?i)\b15\b", "10", clean_prompt)
+    clean_prompt = re.sub(r"\s+", " ", clean_prompt).strip()
+    return build_video_prompt_text(clean_prompt, visible_duration, ratio)
+
+
+def extract_duration_and_ratio_from_post_data(post_data: str) -> tuple[int | None, str]:
+    if not post_data:
+        return None, ""
+    duration_match = re.search(r'\\?"duration\\?"\s*:\s*(\d+)', post_data)
+    ratio_match = re.search(r'\\?"ratio\\?"\s*:\s*\\?"([^"\\]+)', post_data)
+    duration = int(duration_match.group(1)) if duration_match else None
+    ratio = ratio_match.group(1) if ratio_match else ""
+    return duration, ratio
 
 
 def resolve_cdp_url(cdp_url: str) -> str:
@@ -696,6 +942,11 @@ def format_browser_diagnostic(diagnostic: dict[str, Any]) -> str:
         f"conversation={diagnostic.get('conversation_id')}, "
         f"vid={diagnostic.get('vid')}, "
         f"download={diagnostic.get('has_download_url')}, "
+        f"requested_duration={diagnostic.get('requested_duration')}, "
+        f"visible_duration={diagnostic.get('visible_duration')}, "
+        f"captured_duration={diagnostic.get('captured_duration')}, "
+        f"captured_ratio={diagnostic.get('captured_ratio')}, "
+        f"duration_patch={diagnostic.get('duration_patch_applied')}, "
         f"proxy={diagnostic.get('browser_proxy_active')}, "
         f"proxy_host={diagnostic.get('browser_proxy_host')}, "
         f"screenshot={diagnostic.get('screenshot_path')}, "
