@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from hmac import compare_digest
 from pathlib import Path
 from uuid import UUID
@@ -23,6 +24,23 @@ from app.services.jobs import log
 router = APIRouter(prefix="/api/video", tags=["video"])
 
 
+def safe_output_folder_name(prompt_count: int, timestamp: str) -> str:
+    stamp = re.sub(r"[^0-9-]", "", timestamp)
+    return f"{prompt_count}-prompts-{stamp}"
+
+
+def prepare_video_job_config(payload: VideoJobCreate) -> dict:
+    config = payload.model_dump()
+    base_folder = Path(config.get("save_folder") or settings.output_dir)
+    folder_name = safe_output_folder_name(len(payload.prompts), utcnow().strftime("%Y%m%d-%H%M%S"))
+    job_output_folder = base_folder / folder_name
+    job_output_folder.mkdir(parents=True, exist_ok=True)
+    config["base_save_folder"] = str(base_folder)
+    config["job_output_folder"] = str(job_output_folder)
+    config["job_output_folder_name"] = folder_name
+    return config
+
+
 def stable_job(job: Job) -> Job:
     job.items = sorted(job.items, key=lambda item: (item.created_at, str(item.id)))
     job.artifacts = sorted(job.artifacts, key=lambda artifact: (artifact.created_at, str(artifact.id)))
@@ -31,7 +49,8 @@ def stable_job(job: Job) -> Job:
 
 @router.post("/jobs", response_model=JobRead)
 def create_video_job(payload: VideoJobCreate, session: Session = Depends(get_session)) -> Job:
-    job = Job(kind=JobKind.video, status=JobStatus.queued, title=f"Video batch ({len(payload.prompts)})", total=len(payload.prompts), config_json=payload.model_dump())
+    config = prepare_video_job_config(payload)
+    job = Job(kind=JobKind.video, status=JobStatus.queued, title=f"Video batch ({len(payload.prompts)})", total=len(payload.prompts), config_json=config)
     session.add(job)
     session.commit()
     session.refresh(job)

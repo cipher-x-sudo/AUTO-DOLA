@@ -421,7 +421,7 @@ function VideoConsole({
         </div>
       </div>
 
-      <OutputLocation path={HOST_OUTPUT_LABEL} containerPath={DOCKER_OUTPUT_DIR} />
+      <OutputLocation path={activeJobOutputLabel(activeJob) || HOST_OUTPUT_LABEL} containerPath={activeJobOutputContainer(activeJob) || DOCKER_OUTPUT_DIR} basePath={HOST_OUTPUT_LABEL} />
 
       <EngineTelemetry stats={telemetry} state={telemetryState} />
 
@@ -493,7 +493,7 @@ function VideoConsole({
   )
 }
 
-function OutputLocation({ path, containerPath }: { path: string; containerPath: string }) {
+function OutputLocation({ path, containerPath, basePath }: { path: string; containerPath: string; basePath: string }) {
   return (
     <Card className="p-4">
       <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
@@ -505,7 +505,7 @@ function OutputLocation({ path, containerPath }: { path: string; containerPath: 
             <div className="text-xs font-black uppercase tracking-[0.16em] text-muted-foreground">Video output location</div>
             <div className="mt-2 truncate font-mono text-xs font-bold text-foreground">{path}</div>
             <div className="mt-1 text-[11px] font-semibold text-muted-foreground">
-              New MP4s are written directly by Docker to the host Downloads folder. Container path: {containerPath}
+              Base: {basePath}. Container path: {containerPath}
             </div>
           </div>
         </div>
@@ -1644,6 +1644,15 @@ function stableJobItems(items: JobItem[]): JobItem[] {
     if (created !== 0) return created
     return left.id.localeCompare(right.id)
   })
+}
+
+function activeJobOutputLabel(job?: Job | null): string {
+  const folder = String(job?.config_json?.job_output_folder_name || "")
+  return folder ? `${HOST_OUTPUT_LABEL}/${folder}` : ""
+}
+
+function activeJobOutputContainer(job?: Job | null): string {
+  return String(job?.config_json?.job_output_folder || "")
 }
 
 function hasSavedBrowserSnapshot(snapshots: Array<Record<string, unknown>>, itemId: string): boolean {

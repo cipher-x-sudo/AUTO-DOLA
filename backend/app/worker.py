@@ -103,7 +103,7 @@ async def _process_job(job_id: UUID) -> None:
 async def process_video(session: Session, job: Job) -> None:
     app_settings = load_app_settings(session, include_secrets=True)
     config = job.config_json
-    output_dir = Path(config.get("save_folder") or app_settings.get("output_dir") or settings.output_dir)
+    output_dir = Path(config.get("job_output_folder") or config.get("save_folder") or app_settings.get("output_dir") or settings.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     vpn_enabled = bool(app_settings.get("vpn_enabled"))
     proxy_url = app_settings.get("proxy_url", "") if app_settings.get("proxy_enabled") and not vpn_enabled else ""
@@ -637,7 +637,7 @@ async def _resume_video_item_poll(job_id: UUID, item_id: UUID) -> None:
             raise RuntimeError("Saved browser session did not return play_info URL.")
 
         config = job.config_json
-        output_dir = Path(config.get("save_folder") or app_settings.get("output_dir") or settings.output_dir)
+        output_dir = Path(config.get("job_output_folder") or config.get("save_folder") or app_settings.get("output_dir") or settings.output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         filename = unique_video_filename(output_dir, vid, item.title)
         raw_path = output_dir / filename.replace(".mp4", "_raw.mp4")
