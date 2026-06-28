@@ -567,6 +567,12 @@ def connect_vpn(config_path: str, config_name: str, username: str, password: str
         if "AUTH_FAILED" in last_log or "auth-failure" in last_log.lower():
             disconnect_vpn()
             raise RuntimeError("VPN_AUTH_FAILED")
+        if "TLS Error" in last_log or "TLS handshake failed" in last_log:
+            disconnect_vpn()
+            raise RuntimeError("VPN_TLS_FAILED")
+        if any(marker in last_log for marker in ("RESOLVE: Cannot resolve", "Network is unreachable", "Connection timed out", "No route to host")):
+            disconnect_vpn()
+            raise RuntimeError("VPN_ENDPOINT_UNREACHABLE")
         time.sleep(1)
     disconnect_vpn()
     raise RuntimeError("VPN_CONNECT_TIMEOUT")

@@ -874,7 +874,7 @@ function GenerationSettings({
             <div className="min-w-0">
               <div className="text-[11px] font-black uppercase tracking-wide text-muted-foreground">Network</div>
               <div className="mt-1 truncate text-xs font-bold text-foreground">
-                Mode: {networkModeLabel(settings)} - Dola browser {browserStatus?.ok ? "connected" : "disconnected"}
+                Mode: {networkModeLabel(settings)} - Browser {!browserStatus ? "starting" : browserStatus.ok ? "healthy" : "manager unavailable"}
               </div>
               <div className="mt-1 truncate text-[11px] font-semibold text-muted-foreground">{browserStatus?.page_url || browserStatus?.error || "Browser status unavailable"}</div>
               <div className="mt-1 truncate text-[11px] font-semibold text-muted-foreground">
@@ -887,6 +887,12 @@ function GenerationSettings({
                 Browser VPN: {browserStatus?.browser_vpn_active ? `active ${browserStatus.browser_vpn_config || ""} ${browserStatus.browser_vpn_ip || ""}` : "inactive"}
                 {typeof browserStatus?.active_vpn_browser_count === "number" ? ` - isolated slots ${browserStatus.active_vpn_browser_count}` : ""}
               </div>
+              {browserStatus?.vpn_slots?.length ? (
+                <div className="mt-1 truncate text-[11px] font-semibold text-amber-200">
+                  VPN slots: {browserStatus.vpn_slots.map((slot) => `${slot.config_name || slot.slot_id}: ${slot.stage || "starting"}`).join(" | ")}
+                </div>
+              ) : null}
+              {settings.browser_headless && <div className="mt-1 text-[11px] font-semibold text-muted-foreground">Headless mode: generation browser windows are not visible in noVNC.</div>}
               {(browserStatus?.last_submit_endpoint || browserStatus?.last_dola_error) && (
                 <div className="mt-1 truncate text-[11px] font-semibold text-muted-foreground">
                   Last submit: {browserStatus.last_submit_endpoint || "none"} {browserStatus.last_dola_error ? `- ${browserStatus.last_dola_error}` : ""}

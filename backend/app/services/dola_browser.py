@@ -475,6 +475,7 @@ class DolaBrowserClient:
                 "page_count": manager_status.get("active_browser_count", 0),
                 "active_browser_count": manager_status.get("active_browser_count", 0),
                 "active_vpn_browser_count": manager_status.get("active_vpn_browser_count", 0),
+                "vpn_slots": manager_status.get("vpn_slots", []),
                 "max_browser_slots": manager_status.get("max_browser_slots", 0),
                 "active_cdp_ports": manager_status.get("active_cdp_ports", []),
                 "last_submit_endpoint": "",

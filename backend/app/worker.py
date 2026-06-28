@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import random
 import shutil
 import time
 from pathlib import Path
@@ -339,6 +338,10 @@ async def process_video(session: Session, job: Job, only_item_id: UUID | None = 
                         )
                         if message.startswith(progress_prefixes):
                             mark_item(session_local, db_item, ItemStatus.running, f"{action_prefix}{message}")
+                        if vpn_slot_id and message.startswith("Browser slot") and message.endswith("connected"):
+                            asyncio.create_task(browser_client.update_isolated_vpn_slot_stage(vpn_slot_id, "cdp_ready"))
+                        elif vpn_slot_id and message.startswith(("Submitting through browser slot", "Submitting prompt")):
+                            asyncio.create_task(browser_client.update_isolated_vpn_slot_stage(vpn_slot_id, "submitting"))
                         item_log(f"Dola browser: {message}", level)
 
                     async with browser_submit_semaphore:
@@ -347,21 +350,33 @@ async def process_video(session: Session, job: Job, only_item_id: UUID | None = 
                             if not app_settings.get("vpn_password"):
                                 raise DolaBrowserError("OpenVPN password is missing.", {"error_type": "VPN_AUTH_FAILED"}, "VPN_AUTH_FAILED")
                             try:
-                                vpn_config = choose_vpn_config()
+                                vpn_config = await select_vpn_config()
                                 vpn_username = choose_vpn_username(str(app_settings.get("vpn_usernames") or ""))
                             except ValueError as exc:
                                 raise DolaBrowserError(str(exc), {"error_type": str(exc)}, str(exc)) from exc
                             item_log(f"Launching VPN browser slot: config={vpn_config['name']}", "info")
-                            vpn_status = await browser_client.launch_isolated_vpn_slot(
-                                config_path=str(vpn_config_path(vpn_config["name"])),
-                                config_name=str(vpn_config["name"]),
-                                username=vpn_username,
-                                password=str(app_settings.get("vpn_password") or ""),
-                            )
+                            try:
+                                vpn_status = await browser_client.launch_isolated_vpn_slot(
+                                    config_path=str(vpn_config_path(vpn_config["name"])),
+                                    config_name=str(vpn_config["name"]),
+                                    username=vpn_username,
+                                    password=str(app_settings.get("vpn_password") or ""),
+                                    log_fn=item_log,
+                                )
+                            except DolaBrowserError as exc:
+                                await quarantine_vpn_config(str(vpn_config["name"]), exc.error_type)
+                                if exc.error_type == "VPN_CONNECT_TIMEOUT":
+                                    raise DolaBrowserError(
+                                        f"VPN endpoint timed out after 90 seconds: {vpn_config['name']}",
+                                        exc.diagnostic,
+                                        exc.error_type,
+                                    ) from exc
+                                raise
                             vpn_slot_id = str(vpn_status.get("slot_id") or "")
                             vpn_slot_container = str(vpn_status.get("container_name") or "")
                             active_browser_client = DolaBrowserClient(manager_url=str(vpn_status.get("manager_url") or ""), manual_url=browser_client.manual_url, headless=browser_headless)
                             item_log(f"VPN connected slot {vpn_slot_id}: config={vpn_status.get('config_name')}, user={vpn_status.get('username_masked')}, ip={vpn_status.get('ip')}", "success")
+                            await browser_client.update_isolated_vpn_slot_stage(vpn_slot_id, "chromium_starting")
                         try:
                             ensure_current_run()
                             browser_result = await active_browser_client.submit_and_capture_session(
@@ -666,7 +681,15 @@ async def process_video(session: Session, job: Job, only_item_id: UUID | None = 
                 session_local.close()
 
     try:
-        await asyncio.gather(*[_run_item(item) for item in run_items])
+        results = await asyncio.gather(*[_run_item(item) for item in run_items], return_exceptions=True)
+        for item, result in zip(run_items, results):
+            if not isinstance(result, BaseException):
+                continue
+            with Session(engine) as error_session:
+                failed_item = error_session.get(JobItem, item.id)
+                if failed_item and failed_item.status not in {ItemStatus.completed, ItemStatus.cancelled}:
+                    mark_item(error_session, failed_item, ItemStatus.failed, "Worker error", str(result), diagnostic={"error_type": "ITEM_WORKER_ERROR", "error_msg": str(result)})
+                log(error_session, f"[Video item | {item.id.hex[:8]}] Unhandled item error: {result}", "error", job.id)
     finally:
         await submit_client.aclose()
         await poll_client.aclose()

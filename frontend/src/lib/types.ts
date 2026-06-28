@@ -78,6 +78,7 @@ export interface DolaBrowserStatus {
   page_count?: number
   active_browser_count?: number
   active_vpn_browser_count?: number
+  vpn_slots?: Array<{ slot_id: string; config_name?: string; stage?: string; stage_started_at?: number }>
   browser_headless?: boolean
   max_browser_slots?: number
   active_cdp_ports?: number[]

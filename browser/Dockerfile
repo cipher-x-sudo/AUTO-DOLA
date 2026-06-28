@@ -25,7 +25,7 @@ RUN apt-get update \
 WORKDIR /app
 COPY start-browser.sh /app/start-browser.sh
 COPY browser_manager.py /app/browser_manager.py
-RUN chmod +x /app/start-browser.sh
+RUN sed -i 's/\r$//' /app/start-browser.sh && chmod +x /app/start-browser.sh
 
 EXPOSE 6080 7070
 CMD ["/app/start-browser.sh"]
