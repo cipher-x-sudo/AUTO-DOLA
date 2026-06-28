@@ -152,12 +152,13 @@ async def process_video(session: Session, job: Job, only_item_id: UUID | None = 
     run_items = [item for item in items if only_item_id is None or item.id == only_item_id]
     requested_parallel = config.get("parallel", 1)
     parallel = effective_video_parallel(requested_parallel)
+    vpn_browser_slots = effective_video_parallel(app_settings.get("vpn_browser_slots", 5))
     log(session, f"Video concurrency requested: {requested_parallel}", "info", job.id)
     log(session, f"Video concurrency effective: {parallel}", "info", job.id)
-    log(session, f"Video settings: duration={requested_duration}, ratio={config.get('ratio', '9:16')}, mode={effective_dola_mode}, submit_proxy_enabled={bool(proxy_url)}, vpn_enabled={vpn_enabled}, polling_proxy_enabled=False", "info", job.id)
+    log(session, f"Video settings: duration={requested_duration}, ratio={config.get('ratio', '9:16')}, mode={effective_dola_mode}, submit_proxy_enabled={bool(proxy_url)}, vpn_enabled={vpn_enabled}, vpn_browser_slots={vpn_browser_slots}, polling_proxy_enabled=False", "info", job.id)
     max_retries = max(int(config.get("max_retries", 3)), HIGH_DEMAND_MIN_RETRIES)
     semaphore = asyncio.Semaphore(parallel)
-    browser_submit_semaphore = asyncio.Semaphore(1 if vpn_enabled else min(BROWSER_SUBMIT_PARALLEL, parallel))
+    browser_submit_semaphore = asyncio.Semaphore(min(vpn_browser_slots, parallel) if vpn_enabled else min(BROWSER_SUBMIT_PARALLEL, parallel))
 
     def ensure_not_cancelled(session_local: Session, item_id: UUID | None = None) -> JobItem | None:
         session_local.expire_all()
@@ -260,7 +261,9 @@ async def process_video(session: Session, job: Job, only_item_id: UUID | None = 
                     browser_profile_dir = ""
                     browser_profile_retained = False
                     browser_completed = False
-                    vpn_connected = False
+                    vpn_slot_id = ""
+                    vpn_slot_container = ""
+                    active_browser_client = browser_client
 
                     async def cleanup_browser_slot(reason: str, *, delete_profile: bool = True) -> None:
                         nonlocal browser_slot_id, browser_profile_retained
@@ -268,7 +271,7 @@ async def process_video(session: Session, job: Job, only_item_id: UUID | None = 
                             return
                         item_log(f"Closing browser slot after {reason}: {browser_slot_id}", "info")
                         item_log("Deleting browser profile" if delete_profile else "Keeping browser profile for fallback", "info")
-                        if await browser_client.close_slot(browser_slot_id, delete_profile=delete_profile):
+                        if await active_browser_client.close_slot(browser_slot_id, delete_profile=delete_profile):
                             item_log("Browser profile deleted" if delete_profile else "Browser submitted and closed", "success")
                             if not delete_profile:
                                 browser_profile_retained = True
@@ -280,7 +283,7 @@ async def process_video(session: Session, job: Job, only_item_id: UUID | None = 
                         nonlocal browser_profile_retained
                         if not browser_profile_retained or not browser_profile_dir:
                             return
-                        if await browser_client.delete_profile(browser_profile_dir):
+                        if await active_browser_client.delete_profile(browser_profile_dir):
                             item_log("Browser profile deleted", "success")
                         else:
                             item_log(f"Browser profile cleanup failed: {browser_profile_dir}", "warn")
@@ -316,18 +319,20 @@ async def process_video(session: Session, job: Job, only_item_id: UUID | None = 
                                 vpn_username = choose_vpn_username(str(app_settings.get("vpn_usernames") or ""))
                             except ValueError as exc:
                                 raise DolaBrowserError(str(exc), {"error_type": str(exc)}, str(exc)) from exc
-                            item_log(f"Connecting OpenVPN: config={vpn_config['name']}", "info")
-                            vpn_status = await browser_client.vpn_connect(
+                            item_log(f"Launching VPN browser slot: config={vpn_config['name']}", "info")
+                            vpn_status = await browser_client.launch_isolated_vpn_slot(
                                 config_path=str(vpn_config_path(vpn_config["name"])),
                                 config_name=str(vpn_config["name"]),
                                 username=vpn_username,
                                 password=str(app_settings.get("vpn_password") or ""),
                             )
-                            vpn_connected = True
-                            item_log(f"VPN connected: config={vpn_status.get('config_name')}, user={vpn_status.get('username_masked')}, ip={vpn_status.get('ip')}", "success")
+                            vpn_slot_id = str(vpn_status.get("slot_id") or "")
+                            vpn_slot_container = str(vpn_status.get("container_name") or "")
+                            active_browser_client = DolaBrowserClient(manager_url=str(vpn_status.get("manager_url") or ""), manual_url=browser_client.manual_url)
+                            item_log(f"VPN connected slot {vpn_slot_id}: config={vpn_status.get('config_name')}, user={vpn_status.get('username_masked')}, ip={vpn_status.get('ip')}", "success")
                         try:
                             ensure_current_run()
-                            browser_result = await browser_client.submit_and_capture_session(
+                            browser_result = await active_browser_client.submit_and_capture_session(
                                 db_item.prompt,
                                 int(config.get("duration", 10)),
                                 str(config.get("ratio", "9:16")),
@@ -337,16 +342,14 @@ async def process_video(session: Session, job: Job, only_item_id: UUID | None = 
                             if vpn_enabled:
                                 exc.error_type = "DOLA_SUBMIT_FAILED_AFTER_VPN"
                                 exc.diagnostic["error_type"] = "DOLA_SUBMIT_FAILED_AFTER_VPN"
-                                if vpn_connected:
-                                    await browser_client.vpn_disconnect()
-                                    vpn_connected = False
-                                    item_log("OpenVPN disconnected", "success")
+                                if vpn_slot_id or vpn_slot_container:
+                                    await browser_client.close_isolated_vpn_slot(slot_id=vpn_slot_id, container_name=vpn_slot_container)
+                                    item_log(f"VPN browser slot {vpn_slot_id or vpn_slot_container} removed", "success")
                             raise
                         except Exception:
-                            if vpn_enabled and vpn_connected:
-                                await browser_client.vpn_disconnect()
-                                vpn_connected = False
-                                item_log("OpenVPN disconnected", "success")
+                            if vpn_enabled and (vpn_slot_id or vpn_slot_container):
+                                await browser_client.close_isolated_vpn_slot(slot_id=vpn_slot_id, container_name=vpn_slot_container)
+                                item_log(f"VPN browser slot {vpn_slot_id or vpn_slot_container} removed", "success")
                             raise
                     browser_slot_id = browser_result.slot_id
                     ensure_current_run()
@@ -369,6 +372,8 @@ async def process_video(session: Session, job: Job, only_item_id: UUID | None = 
                                 "cdp_port": browser_result.diagnostic.get("cdp_port"),
                                 "profile_retained": not vpn_enabled,
                                 "vpn_enabled": vpn_enabled,
+                                "vpn_slot_id": vpn_slot_id,
+                                "vpn_slot_container": vpn_slot_container,
                                 "requested_duration": browser_result.diagnostic.get("requested_duration"),
                                 "visible_duration": browser_result.diagnostic.get("visible_duration"),
                                 "captured_duration": browser_result.diagnostic.get("captured_duration"),
@@ -389,9 +394,10 @@ async def process_video(session: Session, job: Job, only_item_id: UUID | None = 
                         item_log(format_browser_diagnostic(browser_result.diagnostic), "info")
                         await cleanup_browser_slot("submit", delete_profile=vpn_enabled)
                         if vpn_enabled:
-                            if await browser_client.vpn_disconnect():
-                                item_log("OpenVPN disconnected", "success")
-                            vpn_connected = False
+                            if await browser_client.close_isolated_vpn_slot(slot_id=vpn_slot_id, container_name=vpn_slot_container):
+                                item_log(f"VPN browser slot {vpn_slot_id or vpn_slot_container} removed", "success")
+                            vpn_slot_id = ""
+                            vpn_slot_container = ""
                         else:
                             item_log("Profile retained for fallback", "info")
                         mark_item(session_local, db_item, ItemStatus.running, f"{action_prefix}Polling video id 1/{VIDEO_POLL_ATTEMPTS}")
@@ -471,9 +477,9 @@ async def process_video(session: Session, job: Job, only_item_id: UUID | None = 
                     finally:
                         await cleanup_browser_slot("success" if browser_completed else "rejection", delete_profile=True)
                         await cleanup_retained_profile()
-                        if vpn_connected:
-                            if await browser_client.vpn_disconnect():
-                                item_log("OpenVPN disconnected", "success")
+                        if vpn_slot_id or vpn_slot_container:
+                            if await browser_client.close_isolated_vpn_slot(slot_id=vpn_slot_id, container_name=vpn_slot_container):
+                                item_log(f"VPN browser slot {vpn_slot_id or vpn_slot_container} removed", "success")
 
                 for attempt in range(1, max_retries + 1):
                     last_diagnostic = {}

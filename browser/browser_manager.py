@@ -20,6 +20,11 @@ DISPLAY = os.environ.get("DISPLAY", ":99")
 BASE_PROFILE_DIR = Path(os.environ.get("CHROME_PROFILE_DIR", "/data/browser-profile"))
 LOG_DIR = Path("/data/logs")
 VPN_DIR = Path(os.environ.get("VPN_CONFIG_DIR", "/data/profiles/vpn"))
+SLOT_IMAGE = os.environ.get("BROWSER_SLOT_IMAGE", "auto-dola-browser")
+SLOT_PROFILE_VOLUME = os.environ.get("BROWSER_SLOT_PROFILE_VOLUME", "")
+SLOT_PROFILES_VOLUME = os.environ.get("BROWSER_SLOT_PROFILES_VOLUME", "")
+SLOT_LOGS_VOLUME = os.environ.get("BROWSER_SLOT_LOGS_VOLUME", "")
+SLOT_NETWORK = os.environ.get("BROWSER_SLOT_NETWORK", "")
 PORT_START = int(os.environ.get("BROWSER_SLOT_PORT_START", "9300"))
 PORT_END = int(os.environ.get("BROWSER_SLOT_PORT_END", "9399"))
 EXTERNAL_PORT_START = int(os.environ.get("BROWSER_SLOT_EXTERNAL_PORT_START", "10300"))
@@ -28,6 +33,7 @@ WINDOW_HEIGHT = 900
 
 LOCK = threading.Lock()
 SLOTS: dict[str, dict] = {}
+VPN_SLOT_CONTAINERS: dict[str, dict] = {}
 VPN_STATE: dict[str, object] = {
     "connected": False,
     "process": None,
@@ -38,6 +44,160 @@ VPN_STATE: dict[str, object] = {
     "connected_at": 0,
     "log_file": None,
 }
+
+
+def docker_available() -> bool:
+    return Path("/var/run/docker.sock").exists() and shutil.which("docker") is not None
+
+
+def docker_json(args: list[str]) -> object:
+    output = subprocess.check_output(["docker", *args], text=True)
+    return json.loads(output)
+
+
+def current_container_name() -> str:
+    return socket.gethostname()
+
+
+def current_docker_inspect() -> dict:
+    data = docker_json(["inspect", current_container_name()])
+    if not isinstance(data, list) or not data:
+        raise RuntimeError("Docker inspect returned no current container metadata.")
+    return data[0]
+
+
+def current_network_name() -> str:
+    if SLOT_NETWORK:
+        return SLOT_NETWORK
+    inspect = current_docker_inspect()
+    networks = ((inspect.get("NetworkSettings") or {}).get("Networks") or {})
+    if not networks:
+        raise RuntimeError("VPN_SLOT_NETWORK_MISSING")
+    return next(iter(networks.keys()))
+
+
+def mounted_volume_name(destination: str, fallback: str) -> str:
+    if fallback:
+        return fallback
+    inspect = current_docker_inspect()
+    for mount in inspect.get("Mounts") or []:
+        if mount.get("Destination") == destination and mount.get("Type") == "volume":
+            return str(mount.get("Name") or "")
+    raise RuntimeError(f"VPN_SLOT_VOLUME_MISSING:{destination}")
+
+
+def wait_for_manager(url: str, timeout: float = 45.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen(f"{url.rstrip('/')}/status", timeout=2) as response:
+                if response.status == 200:
+                    return
+        except Exception:
+            time.sleep(1)
+    raise RuntimeError("VPN_SLOT_LAUNCH_FAILED")
+
+
+def manager_post(url: str, endpoint: str, payload: dict, timeout: float = 120.0) -> dict:
+    body = json.dumps(payload).encode()
+    request = urllib.request.Request(
+        f"{url.rstrip('/')}{endpoint}",
+        data=body,
+        headers={"content-type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        data = json.loads(response.read().decode())
+    if not isinstance(data, dict):
+        raise RuntimeError("VPN_SLOT_MANAGER_ERROR")
+    if not data.get("ok", True):
+        raise RuntimeError(str(data.get("error") or "VPN_SLOT_MANAGER_ERROR"))
+    return data
+
+
+def launch_isolated_vpn_slot(config_path: str, config_name: str, username: str, password: str) -> dict:
+    if not docker_available():
+        raise RuntimeError("VPN_SLOT_DOCKER_UNAVAILABLE")
+    config = validate_vpn_config_path(config_path)
+    slot_id = f"vpn-slot-{int(time.time() * 1000)}"
+    container_name = f"auto-dola-{slot_id}"
+    network = current_network_name()
+    profile_volume = mounted_volume_name("/data/browser-profile", SLOT_PROFILE_VOLUME)
+    profiles_volume = mounted_volume_name("/data/profiles", SLOT_PROFILES_VOLUME)
+    logs_volume = mounted_volume_name("/data/logs", SLOT_LOGS_VOLUME)
+    subprocess.check_call(
+        [
+            "docker",
+            "run",
+            "-d",
+            "--rm",
+            "--name",
+            container_name,
+            "--cap-add",
+            "NET_ADMIN",
+            "--device",
+            "/dev/net/tun:/dev/net/tun",
+            "--network",
+            network,
+            "-e",
+            "VPN_CONFIG_DIR=/data/profiles/vpn",
+            "-e",
+            "CHROME_PROFILE_DIR=/data/browser-profile",
+            "-v",
+            f"{profile_volume}:/data/browser-profile",
+            "-v",
+            f"{profiles_volume}:/data/profiles",
+            "-v",
+            f"{logs_volume}:/data/logs",
+            SLOT_IMAGE,
+        ]
+    )
+    manager_url = f"http://{container_name}:7070"
+    try:
+        wait_for_manager(manager_url)
+        vpn_result = manager_post(
+            manager_url,
+            "/vpn/connect",
+            {
+                "config_path": str(config),
+                "config_name": config_name or config.name,
+                "username": username,
+                "password": password,
+            },
+            timeout=120,
+        )
+    except Exception:
+        subprocess.call(["docker", "rm", "-f", container_name])
+        raise
+    slot = {
+        "ok": True,
+        "slot_id": slot_id,
+        "container_name": container_name,
+        "manager_url": manager_url,
+        "config_name": config_name or config.name,
+        "username_masked": mask_username(username),
+        "ip": vpn_result.get("ip", ""),
+        "started_at": time.time(),
+    }
+    with LOCK:
+        VPN_SLOT_CONTAINERS[slot_id] = slot
+    return slot
+
+
+def close_isolated_vpn_slot(slot_id: str = "", container_name: str = "") -> bool:
+    with LOCK:
+        slot = VPN_SLOT_CONTAINERS.pop(slot_id, None) if slot_id else None
+    name = container_name or str((slot or {}).get("container_name") or "")
+    manager_url = str((slot or {}).get("manager_url") or (f"http://{name}:7070" if name else ""))
+    if manager_url:
+        try:
+            manager_post(manager_url, "/vpn/disconnect", {}, timeout=15)
+        except Exception:
+            pass
+    if name:
+        subprocess.call(["docker", "rm", "-f", name])
+        return True
+    return False
 
 
 def json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict) -> None:
@@ -374,12 +534,15 @@ def connection_slot(slot: dict) -> dict:
 def status() -> dict:
     with LOCK:
         slots = [public_slot(slot) for slot in SLOTS.values()]
+        vpn_slots = [dict(slot) for slot in VPN_SLOT_CONTAINERS.values()]
     return {
         "ok": True,
         "active_browser_count": len(slots),
         "max_browser_slots": PORT_END - PORT_START + 1,
         "active_cdp_ports": [slot["external_port"] for slot in slots],
         "slots": slots,
+        "active_vpn_browser_count": len(vpn_slots),
+        "vpn_slots": vpn_slots,
     }
 
 
@@ -445,6 +608,28 @@ class Handler(BaseHTTPRequestHandler):
                 finally:
                     disconnect_vpn()
                 return
+            if self.path == "/vpn-slot/launch":
+                result = launch_isolated_vpn_slot(
+                    str(payload.get("config_path") or ""),
+                    str(payload.get("config_name") or ""),
+                    str(payload.get("username") or ""),
+                    str(payload.get("password") or ""),
+                )
+                json_response(self, 200, result)
+                return
+            if self.path == "/vpn-slot/close":
+                json_response(
+                    self,
+                    200,
+                    {
+                        "ok": True,
+                        "closed": close_isolated_vpn_slot(
+                            str(payload.get("slot_id") or ""),
+                            str(payload.get("container_name") or ""),
+                        ),
+                    },
+                )
+                return
             json_response(self, 404, {"ok": False, "error": "Not found"})
         except Exception as exc:
             json_response(self, 500, {"ok": False, "error": str(exc)})
@@ -455,6 +640,8 @@ class Handler(BaseHTTPRequestHandler):
 
 def shutdown(*_args: object) -> None:
     disconnect_vpn()
+    for slot_id in list(VPN_SLOT_CONTAINERS):
+        close_isolated_vpn_slot(slot_id)
     for slot_id in list(SLOTS):
         close_slot(slot_id)
     raise SystemExit(0)

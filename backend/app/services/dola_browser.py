@@ -304,6 +304,40 @@ class DolaBrowserClient:
         except Exception:
             return False
 
+    async def launch_isolated_vpn_slot(self, *, config_path: str, config_name: str, username: str, password: str) -> dict[str, Any]:
+        async with httpx.AsyncClient(timeout=180) as client:
+            response = await client.post(
+                f"{resolve_cdp_url(self.manager_url).rstrip('/')}/vpn-slot/launch",
+                json={
+                    "config_path": config_path,
+                    "config_name": config_name,
+                    "username": username,
+                    "password": password,
+                },
+            )
+            response.raise_for_status()
+            payload = response.json()
+        if not payload.get("ok"):
+            raise DolaBrowserError(
+                f"OpenVPN browser slot failed: {payload.get('error')}",
+                {"cdp": False, "error_msg": payload.get("error")},
+                str(payload.get("error") or "VPN_SLOT_LAUNCH_FAILED"),
+            )
+        return payload
+
+    async def close_isolated_vpn_slot(self, *, slot_id: str = "", container_name: str = "") -> bool:
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.post(
+                    f"{resolve_cdp_url(self.manager_url).rstrip('/')}/vpn-slot/close",
+                    json={"slot_id": slot_id, "container_name": container_name},
+                )
+                response.raise_for_status()
+                payload = response.json()
+                return bool(payload.get("closed"))
+        except Exception:
+            return False
+
     async def _slot_context(self, slot_id: str) -> BrowserContext:
         runtime = self._active_slots.get(slot_id)
         if not runtime:
@@ -347,6 +381,7 @@ class DolaBrowserClient:
                 "browser_ip": browser_ip,
                 "page_count": manager_status.get("active_browser_count", 0),
                 "active_browser_count": manager_status.get("active_browser_count", 0),
+                "active_vpn_browser_count": manager_status.get("active_vpn_browser_count", 0),
                 "max_browser_slots": manager_status.get("max_browser_slots", 0),
                 "active_cdp_ports": manager_status.get("active_cdp_ports", []),
                 "last_submit_endpoint": "",

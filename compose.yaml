@@ -20,14 +20,12 @@ services:
       - auto_dola_redis:/data
 
   browser:
+    image: ${AUTO_DOLA_BROWSER_SLOT_IMAGE:-auto-dola-browser}
     build:
       context: ./browser
     environment:
       VPN_CONFIG_DIR: /data/profiles/vpn
       BROWSER_SLOT_IMAGE: ${AUTO_DOLA_BROWSER_SLOT_IMAGE:-auto-dola-browser}
-      BROWSER_SLOT_PROFILE_VOLUME: ${AUTO_DOLA_BROWSER_PROFILE_VOLUME:-auto-dola_browser_profile}
-      BROWSER_SLOT_PROFILES_VOLUME: ${AUTO_DOLA_PROFILES_VOLUME:-auto-dola_profiles}
-      BROWSER_SLOT_LOGS_VOLUME: ${AUTO_DOLA_LOGS_VOLUME:-auto-dola_logs}
     shm_size: "1gb"
     cap_add:
       - NET_ADMIN
