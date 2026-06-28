@@ -588,6 +588,10 @@ async def process_video(session: Session, job: Job, only_item_id: UUID | None = 
                                 item_log(format_browser_diagnostic(browser_exc.diagnostic), "error")
                                 if attempt >= max_retries:
                                     break
+                                item_log(f"Attempt {attempt} failed in Dola browser: {browser_exc}. Retrying...", "warn")
+                                if not await wait_before_retry(10):
+                                    return
+                                continue
                         if attempt < max_retries:
                             if exc.diagnostic.get("error_code") == 710022002:
                                 delay_seconds = HIGH_DEMAND_BACKOFF_SECONDS[min(attempt - 1, len(HIGH_DEMAND_BACKOFF_SECONDS) - 1)]

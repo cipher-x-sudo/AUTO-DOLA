@@ -230,10 +230,11 @@ def test_isolated_vpn_slot_uses_unique_child_profile_root(monkeypatch, tmp_path:
     monkeypatch.setattr(manager, "wait_for_manager", lambda _url: None)
     monkeypatch.setattr(manager, "manager_post", lambda *_args, **_kwargs: {"ok": True, "ip": "1.2.3.4"})
 
-    def fake_check_call(command: list[str]) -> None:
+    def fake_run(command: list[str], **_kwargs):
         commands.append(command)
+        return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
 
-    monkeypatch.setattr(manager.subprocess, "check_call", fake_check_call)
+    monkeypatch.setattr(manager.subprocess, "run", fake_run)
 
     slot = manager.launch_isolated_vpn_slot(str(config), config.name, "user", "pass", headless=True)
     command = commands[0]

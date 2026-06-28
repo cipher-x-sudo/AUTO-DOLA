@@ -11,6 +11,7 @@ import threading
 import time
 import tempfile
 import urllib.request
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlparse
@@ -44,6 +45,15 @@ VPN_STATE: dict[str, object] = {
     "connected_at": 0,
     "log_file": None,
 }
+
+
+class VpnSlotLaunchError(RuntimeError):
+    def __init__(self, error: str, detail: str, slot_id: str, container_name: str) -> None:
+        super().__init__(error)
+        self.error = error
+        self.detail = detail
+        self.slot_id = slot_id
+        self.container_name = container_name
 
 
 def docker_available() -> bool:
@@ -119,15 +129,14 @@ def launch_isolated_vpn_slot(config_path: str, config_name: str, username: str, 
     if not docker_available():
         raise RuntimeError("VPN_SLOT_DOCKER_UNAVAILABLE")
     config = validate_vpn_config_path(config_path)
-    slot_id = f"vpn-slot-{int(time.time() * 1000)}"
+    slot_id = f"vpn-slot-{uuid.uuid4().hex}"
     container_name = f"auto-dola-{slot_id}"
     child_profile_root = f"/data/browser-profile/vpn-slots/{slot_id}"
     network = current_network_name()
     profile_volume = mounted_volume_name("/data/browser-profile", SLOT_PROFILE_VOLUME)
     profiles_volume = mounted_volume_name("/data/profiles", SLOT_PROFILES_VOLUME)
     logs_volume = mounted_volume_name("/data/logs", SLOT_LOGS_VOLUME)
-    subprocess.check_call(
-        [
+    command = [
             "docker",
             "run",
             "-d",
@@ -154,7 +163,10 @@ def launch_isolated_vpn_slot(config_path: str, config_name: str, username: str, 
             f"{logs_volume}:/data/logs",
             SLOT_IMAGE,
         ]
-    )
+    launch = subprocess.run(command, capture_output=True, text=True, check=False)
+    if launch.returncode:
+        detail = (launch.stderr or launch.stdout or f"docker exited with status {launch.returncode}").strip()
+        raise VpnSlotLaunchError("VPN_SLOT_CONTAINER_LAUNCH_FAILED", detail, slot_id, container_name)
     manager_url = f"http://{container_name}:7070"
     try:
         wait_for_manager(manager_url)
@@ -691,6 +703,7 @@ class Handler(BaseHTTPRequestHandler):
                     str(payload.get("config_name") or ""),
                     str(payload.get("username") or ""),
                     str(payload.get("password") or ""),
+                    bool(payload.get("headless", browser_headless_enabled())),
                 )
                 json_response(self, 200, result)
                 return
@@ -711,6 +724,18 @@ class Handler(BaseHTTPRequestHandler):
                 json_response(self, 200, kill_all())
                 return
             json_response(self, 404, {"ok": False, "error": "Not found"})
+        except VpnSlotLaunchError as exc:
+            json_response(
+                self,
+                500,
+                {
+                    "ok": False,
+                    "error": exc.error,
+                    "detail": exc.detail,
+                    "slot_id": exc.slot_id,
+                    "container_name": exc.container_name,
+                },
+            )
         except Exception as exc:
             json_response(self, 500, {"ok": False, "error": str(exc)})
 
