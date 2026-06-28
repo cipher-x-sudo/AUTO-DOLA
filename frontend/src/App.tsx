@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react"
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import {
   Check,
   Copy,
@@ -62,19 +62,21 @@ const emptySettings: SettingsPayload = {
   dola_mode: "hybrid",
 }
 
-type Page = "video" | "prompts" | "gallery" | "history"
+type Page = "video" | "prompts" | "gallery" | "history" | "settings"
 
 const pageRoutes: Record<Page, string> = {
   video: "/video",
   prompts: "/prompt-generator",
   gallery: "/gallery",
   history: "/history",
+  settings: "/settings",
 }
 
 function pageFromPath(pathname: string): Page {
   if (pathname === "/prompt-generator" || pathname === "/prompts") return "prompts"
   if (pathname === "/gallery") return "gallery"
   if (pathname === "/history") return "history"
+  if (pathname === "/settings") return "settings"
   return "video"
 }
 
@@ -192,7 +194,6 @@ export default function App() {
           promptText={studioPromptText}
           setPromptText={setStudioPromptText}
           onRefresh={refresh}
-          onSettingsSaved={setSettings}
         />
       )}
       {page === "prompts" && (
@@ -204,6 +205,14 @@ export default function App() {
       )}
       {page === "gallery" && <GalleryPage videos={videos} />}
       {page === "history" && <History jobs={jobs} onRefresh={refresh} />}
+      {page === "settings" && (
+        <SettingsPage
+          settings={settings}
+          browserStatus={browserStatus}
+          onSettingsSaved={setSettings}
+          onRefresh={refresh}
+        />
+      )}
     </Layout>
   )
 }
@@ -217,7 +226,6 @@ function VideoConsole({
   promptText,
   setPromptText,
   onRefresh,
-  onSettingsSaved,
 }: {
   settings: SettingsPayload
   jobs: Job[]
@@ -227,41 +235,20 @@ function VideoConsole({
   promptText: string
   setPromptText: (value: string) => void
   onRefresh: () => void
-  onSettingsSaved: (settings: SettingsPayload) => void
 }) {
   const [ratio, setRatio] = useState(settings.default_ratio || "9:16")
   const [duration, setDuration] = useState(settings.default_duration || 10)
   const [parallel, setParallel] = useState(settings.default_parallel || 30)
   const [cleanWatermark, setCleanWatermark] = useState(true)
   const [saveMode, setSaveMode] = useState("final")
-  const [proxyEnabled, setProxyEnabled] = useState(settings.proxy_enabled)
-  const [proxyUrl, setProxyUrl] = useState(settings.proxy_url || "")
-  const [vpnEnabled, setVpnEnabled] = useState(settings.vpn_enabled)
-  const [vpnUsernames, setVpnUsernames] = useState(settings.vpn_usernames || "")
-  const [vpnPassword, setVpnPassword] = useState("")
-  const [vpnConfigs, setVpnConfigs] = useState<Array<{ name: string; size_bytes: number }>>([])
-  const [vpnStatus, setVpnStatus] = useState<{ connected: boolean; config_name?: string; username_masked?: string; ip?: string } | null>(null)
-  const [savingProxy, setSavingProxy] = useState(false)
-  const [testingProxy, setTestingProxy] = useState(false)
-  const [testingVpn, setTestingVpn] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [logSearch, setLogSearch] = useState("")
-  const vpnFileRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
     setRatio((current) => current || settings.default_ratio || "9:16")
     setDuration((current) => current || settings.default_duration || 10)
     setParallel((current) => current || settings.default_parallel || 30)
-    setProxyEnabled(settings.proxy_enabled)
-    setProxyUrl(settings.proxy_url || "")
-    setVpnEnabled(settings.vpn_enabled)
-    setVpnUsernames(settings.vpn_usernames || "")
-    setVpnPassword("")
   }, [settings])
-
-  useEffect(() => {
-    refreshVpn()
-  }, [])
 
   const stats = useMemo(() => {
     const items = stableJobItems(jobs.flatMap((job) => job.items))
@@ -325,92 +312,6 @@ function VideoConsole({
     }
   }
 
-  async function saveProxySettings() {
-    setSavingProxy(true)
-    try {
-      const saved = await api.saveSettings({
-        ...settings,
-        proxy_enabled: proxyEnabled && !vpnEnabled,
-        proxy_url: proxyUrl,
-        vpn_enabled: vpnEnabled,
-        vpn_usernames: vpnUsernames,
-        vpn_password: vpnPassword,
-      })
-      onSettingsSaved(saved)
-      toast.success("Network settings saved")
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Failed to save network settings")
-    } finally {
-      setSavingProxy(false)
-    }
-  }
-
-  async function refreshVpn() {
-    try {
-      const [configs, status] = await Promise.all([api.vpnConfigs(), api.vpnStatus()])
-      setVpnConfigs(configs.configs)
-      setVpnStatus({ connected: status.connected, config_name: status.config_name, username_masked: status.username_masked, ip: status.ip })
-    } catch {
-      setVpnStatus(null)
-    }
-  }
-
-  async function uploadVpnFiles(files: FileList | null) {
-    if (!files?.length) return
-    try {
-      for (const file of Array.from(files)) {
-        await api.uploadVpnConfig(file)
-      }
-      toast.success("VPN configs uploaded")
-      refreshVpn()
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "VPN upload failed")
-    }
-  }
-
-  async function deleteVpnConfig(name: string) {
-    try {
-      await api.deleteVpnConfig(name)
-      toast.success("VPN config deleted")
-      refreshVpn()
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "VPN delete failed")
-    }
-  }
-
-  async function testVpn() {
-    setTestingVpn(true)
-    try {
-      await api.saveSettings({ ...settings, vpn_enabled: vpnEnabled, vpn_usernames: vpnUsernames, vpn_password: vpnPassword })
-      const result = await api.testVpn()
-      toast.success(result.ip ? `VPN reachable: ${result.ip}` : "VPN reachable")
-      refreshVpn()
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "VPN test failed")
-    } finally {
-      setTestingVpn(false)
-    }
-  }
-
-  async function testProxy() {
-    if (!proxyUrl.trim()) {
-      toast.error("Add proxy URL first.")
-      return
-    }
-    setTestingProxy(true)
-    try {
-      const result = await api.testProxy(proxyUrl)
-      if (result.ok) {
-        toast.success(result.ip ? `Proxy reachable: ${result.ip}` : result.message)
-      } else {
-        toast.error(result.message)
-      }
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Proxy test failed")
-    } finally {
-      setTestingProxy(false)
-    }
-  }
 
   return (
     <div className="mx-auto max-w-[1760px] space-y-5">
@@ -446,32 +347,10 @@ function VideoConsole({
             setCleanWatermark={setCleanWatermark}
             saveMode={saveMode}
             setSaveMode={setSaveMode}
-            proxyEnabled={proxyEnabled}
-            setProxyEnabled={setProxyEnabled}
-            proxyUrl={proxyUrl}
-            setProxyUrl={setProxyUrl}
-            vpnEnabled={vpnEnabled}
-            setVpnEnabled={setVpnEnabled}
-            vpnUsernames={vpnUsernames}
-            setVpnUsernames={setVpnUsernames}
-            vpnPassword={vpnPassword}
-            setVpnPassword={setVpnPassword}
-            vpnConfigs={vpnConfigs}
-            vpnStatus={vpnStatus}
-            vpnFileRef={vpnFileRef}
-            testingVpn={testingVpn}
-            savingProxy={savingProxy}
-            testingProxy={testingProxy}
             settings={settings}
             browserStatus={browserStatus}
             submitting={submitting}
             hasActiveJob={!!activeJob && ["queued", "running"].includes(activeJob.status)}
-            onSaveProxy={saveProxySettings}
-            onTestProxy={testProxy}
-            onUploadVpnFiles={uploadVpnFiles}
-            onDeleteVpnConfig={deleteVpnConfig}
-            onTestVpn={testVpn}
-            onRefreshVpn={refreshVpn}
             onStart={submit}
             onStop={stopGeneration}
           />
@@ -514,6 +393,234 @@ function OutputLocation({ path, containerPath, basePath }: { path: string; conta
   )
 }
 
+type NetworkMode = "direct" | "proxy" | "vpn"
+
+function networkModeLabel(settings: SettingsPayload): string {
+  if (settings.vpn_enabled) return "OpenVPN"
+  if (settings.proxy_enabled) return "Proxy"
+  return "Direct"
+}
+
+function SettingsPage({
+  settings,
+  browserStatus,
+  onSettingsSaved,
+  onRefresh,
+}: {
+  settings: SettingsPayload
+  browserStatus: DolaBrowserStatus | null
+  onSettingsSaved: (settings: SettingsPayload) => void
+  onRefresh: () => void
+}) {
+  const [networkMode, setNetworkMode] = useState<NetworkMode>(() => settings.vpn_enabled ? "vpn" : settings.proxy_enabled ? "proxy" : "direct")
+  const [proxyUrl, setProxyUrl] = useState(settings.proxy_url || "")
+  const [vpnUsernames, setVpnUsernames] = useState(settings.vpn_usernames || "")
+  const [vpnPassword, setVpnPassword] = useState("")
+  const [vpnConfigs, setVpnConfigs] = useState<Array<{ name: string; size_bytes: number }>>([])
+  const [vpnStatus, setVpnStatus] = useState<{ connected: boolean; config_name?: string; username_masked?: string; ip?: string } | null>(null)
+  const [saving, setSaving] = useState(false)
+  const [testingProxy, setTestingProxy] = useState(false)
+  const [testingVpn, setTestingVpn] = useState(false)
+  const vpnFileRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    setNetworkMode(settings.vpn_enabled ? "vpn" : settings.proxy_enabled ? "proxy" : "direct")
+    setProxyUrl(settings.proxy_url || "")
+    setVpnUsernames(settings.vpn_usernames || "")
+    setVpnPassword("")
+  }, [settings])
+
+  useEffect(() => {
+    refreshVpn()
+  }, [])
+
+  async function saveNetworkSettings() {
+    setSaving(true)
+    try {
+      const saved = await api.saveSettings({
+        ...settings,
+        proxy_enabled: networkMode === "proxy",
+        proxy_url: proxyUrl,
+        vpn_enabled: networkMode === "vpn",
+        vpn_usernames: vpnUsernames,
+        vpn_password: vpnPassword,
+      })
+      onSettingsSaved(saved)
+      toast.success("Network settings saved")
+      onRefresh()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to save network settings")
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function testProxy() {
+    if (!proxyUrl.trim()) {
+      toast.error("Add proxy URL first.")
+      return
+    }
+    setTestingProxy(true)
+    try {
+      const result = await api.testProxy(proxyUrl)
+      result.ok ? toast.success(result.ip ? `Proxy reachable: ${result.ip}` : result.message) : toast.error(result.message)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Proxy test failed")
+    } finally {
+      setTestingProxy(false)
+    }
+  }
+
+  async function refreshVpn() {
+    try {
+      const [configs, status] = await Promise.all([api.vpnConfigs(), api.vpnStatus()])
+      setVpnConfigs(configs.configs)
+      setVpnStatus({ connected: status.connected, config_name: status.config_name, username_masked: status.username_masked, ip: status.ip })
+    } catch {
+      setVpnStatus(null)
+    }
+  }
+
+  async function uploadVpnFiles(files: FileList | null) {
+    if (!files?.length) return
+    try {
+      for (const file of Array.from(files)) {
+        await api.uploadVpnConfig(file)
+      }
+      toast.success("VPN configs uploaded")
+      refreshVpn()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "VPN upload failed")
+    }
+  }
+
+  async function deleteVpnConfig(name: string) {
+    try {
+      await api.deleteVpnConfig(name)
+      toast.success("VPN config deleted")
+      refreshVpn()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "VPN delete failed")
+    }
+  }
+
+  async function testVpn() {
+    setTestingVpn(true)
+    try {
+      await api.saveSettings({ ...settings, proxy_enabled: false, vpn_enabled: true, vpn_usernames: vpnUsernames, vpn_password: vpnPassword })
+      const result = await api.testVpn()
+      toast.success(result.ip ? `VPN reachable: ${result.ip}` : "VPN reachable")
+      refreshVpn()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "VPN test failed")
+    } finally {
+      setTestingVpn(false)
+    }
+  }
+
+  return (
+    <div className="mx-auto max-w-[1100px] space-y-5">
+      <div className="border-b border-border/70 pb-4">
+        <h1 className="text-xl font-black tracking-tight sm:text-2xl">Settings</h1>
+        <p className="mt-1 text-xs font-semibold text-muted-foreground">Choose one network mode for Dola session and browser submit.</p>
+      </div>
+
+      <Card className="p-4">
+        <SectionTitle icon={<Settings2 size={15} />} title="Network Mode" />
+        <div className="mt-4 grid grid-cols-3 gap-2">
+          {(["direct", "proxy", "vpn"] as NetworkMode[]).map((mode) => (
+            <button
+              key={mode}
+              type="button"
+              onClick={() => setNetworkMode(mode)}
+              className={`h-11 rounded-md border text-xs font-black uppercase tracking-wide ${
+                networkMode === mode ? "border-primary bg-primary text-primary-foreground" : "border-border bg-background text-muted-foreground hover:bg-muted"
+              }`}
+            >
+              {mode === "direct" ? "Direct" : mode === "proxy" ? "Proxy" : "OpenVPN"}
+            </button>
+          ))}
+        </div>
+
+        {networkMode === "proxy" && (
+          <div className="mt-4 grid gap-3">
+            <Field label="Proxy URL">
+              <Input value={proxyUrl} onChange={(event) => setProxyUrl(event.target.value)} placeholder="http://user:pass@host:port" />
+            </Field>
+            <div className="grid grid-cols-2 gap-2">
+              <Button variant="secondary" onClick={testProxy} disabled={testingProxy || !proxyUrl.trim()}>
+                {testingProxy ? <Loader2 className="animate-spin" size={16} /> : <Zap size={16} />}
+                Test Proxy
+              </Button>
+              <Button variant="secondary" onClick={saveNetworkSettings} disabled={saving}>
+                {saving ? <Loader2 className="animate-spin" size={16} /> : <Settings2 size={16} />}
+                Save
+              </Button>
+            </div>
+          </div>
+        )}
+
+        {networkMode === "vpn" && (
+          <div className="mt-4 grid gap-3">
+            <Field label="VPN username">
+              <Input value={vpnUsernames} onChange={(event) => setVpnUsernames(event.target.value)} placeholder="Shared username for all VPN files" />
+            </Field>
+            <Field label={settings.vpn_password_saved ? "VPN shared password (saved)" : "VPN shared password"}>
+              <Input type="password" value={vpnPassword} onChange={(event) => setVpnPassword(event.target.value)} placeholder={settings.vpn_password_saved ? "Leave blank to keep saved password" : "Shared VPN password"} />
+            </Field>
+            <input ref={vpnFileRef} type="file" accept=".ovpn" multiple className="hidden" onChange={(event) => uploadVpnFiles(event.target.files)} />
+            <div className="grid grid-cols-3 gap-2">
+              <Button variant="secondary" onClick={() => vpnFileRef.current?.click()}>
+                <Upload size={16} />
+                Upload .ovpn
+              </Button>
+              <Button variant="secondary" onClick={testVpn} disabled={testingVpn || !vpnUsernames.trim()}>
+                {testingVpn ? <Loader2 className="animate-spin" size={16} /> : <Zap size={16} />}
+                Test VPN
+              </Button>
+              <Button variant="secondary" onClick={saveNetworkSettings} disabled={saving}>
+                {saving ? <Loader2 className="animate-spin" size={16} /> : <Settings2 size={16} />}
+                Save
+              </Button>
+            </div>
+            <div className="rounded-md border border-border bg-background p-3 text-[11px] font-semibold text-muted-foreground">
+              <div className="truncate">VPN status: {vpnStatus?.connected ? `connected ${vpnStatus.config_name || ""} ${vpnStatus.ip || ""}` : "disconnected"}</div>
+              <div className="mt-2 flex flex-wrap gap-2">
+                {vpnConfigs.length ? vpnConfigs.map((config) => (
+                  <span key={config.name} className="inline-flex max-w-full items-center gap-2 rounded-md bg-muted px-2 py-1">
+                    <span className="truncate">{config.name}</span>
+                    <button type="button" onClick={() => deleteVpnConfig(config.name)} className="text-red-300 hover:text-red-200">delete</button>
+                  </span>
+                )) : <span>No .ovpn configs uploaded</span>}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {networkMode === "direct" && (
+          <div className="mt-4 grid gap-3">
+            <div className="rounded-md border border-border bg-background p-3 text-xs font-semibold text-muted-foreground">Direct mode disables proxy and OpenVPN for Dola submit.</div>
+            <Button variant="secondary" onClick={saveNetworkSettings} disabled={saving}>
+              {saving ? <Loader2 className="animate-spin" size={16} /> : <Settings2 size={16} />}
+              Save Direct Mode
+            </Button>
+          </div>
+        )}
+      </Card>
+
+      <Card className="p-4">
+        <SectionTitle icon={<Terminal size={15} />} title="Dola Browser" />
+        <div className="mt-3 text-xs font-semibold text-muted-foreground">
+          <div>Current mode: {networkModeLabel(settings)}</div>
+          <div>Browser: {browserStatus?.ok ? "connected" : "disconnected"}</div>
+          <div>Proxy: {browserStatus?.browser_proxy_active ? `active ${browserStatus.browser_proxy_host || ""}` : "inactive"}</div>
+          <div>VPN: {browserStatus?.browser_vpn_active ? `active ${browserStatus.browser_vpn_config || ""} ${browserStatus.browser_vpn_ip || ""}` : "inactive"}</div>
+        </div>
+      </Card>
+    </div>
+  )
+}
+
 function GenerationSettings({
   ratio,
   setRatio,
@@ -525,32 +632,10 @@ function GenerationSettings({
   setCleanWatermark,
   saveMode,
   setSaveMode,
-  proxyEnabled,
-  setProxyEnabled,
-  proxyUrl,
-  setProxyUrl,
-  vpnEnabled,
-  setVpnEnabled,
-  vpnUsernames,
-  setVpnUsernames,
-  vpnPassword,
-  setVpnPassword,
-  vpnConfigs,
-  vpnStatus,
-  vpnFileRef,
-  testingVpn,
-  savingProxy,
-  testingProxy,
   settings,
   browserStatus,
   submitting,
   hasActiveJob,
-  onSaveProxy,
-  onTestProxy,
-  onUploadVpnFiles,
-  onDeleteVpnConfig,
-  onTestVpn,
-  onRefreshVpn,
   onStart,
   onStop,
 }: {
@@ -564,32 +649,10 @@ function GenerationSettings({
   setCleanWatermark: (value: boolean) => void
   saveMode: string
   setSaveMode: (value: string) => void
-  proxyEnabled: boolean
-  setProxyEnabled: (value: boolean) => void
-  proxyUrl: string
-  setProxyUrl: (value: string) => void
-  vpnEnabled: boolean
-  setVpnEnabled: (value: boolean) => void
-  vpnUsernames: string
-  setVpnUsernames: (value: string) => void
-  vpnPassword: string
-  setVpnPassword: (value: string) => void
-  vpnConfigs: Array<{ name: string; size_bytes: number }>
-  vpnStatus: { connected: boolean; config_name?: string; username_masked?: string; ip?: string } | null
-  vpnFileRef: RefObject<HTMLInputElement>
-  testingVpn: boolean
-  savingProxy: boolean
-  testingProxy: boolean
   settings: SettingsPayload
   browserStatus: DolaBrowserStatus | null
   submitting: boolean
   hasActiveJob: boolean
-  onSaveProxy: () => void
-  onTestProxy: () => void
-  onUploadVpnFiles: (files: FileList | null) => void
-  onDeleteVpnConfig: (name: string) => void
-  onTestVpn: () => void
-  onRefreshVpn: () => void
   onStart: () => void
   onStop: () => void
 }) {
@@ -628,74 +691,12 @@ function GenerationSettings({
             <option value="both">Both raw and final</option>
           </Select>
         </Field>
-        <label className="flex min-h-10 items-center gap-3 rounded-md border border-border bg-background px-3 text-xs font-black uppercase tracking-wide text-muted-foreground sm:col-span-2">
-          <input type="checkbox" checked={proxyEnabled} onChange={(event) => setProxyEnabled(event.target.checked)} className="h-4 w-4 accent-[hsl(var(--primary))]" />
-          Use proxy for Dola session + submit
-        </label>
-        <Field label="Proxy URL" className="sm:col-span-2">
-          <Input
-            value={proxyUrl}
-            onChange={(event) => setProxyUrl(event.target.value)}
-            placeholder="http://user:pass@host:port"
-          />
-        </Field>
-        <div className="grid grid-cols-2 gap-2 sm:col-span-2">
-          <Button variant="secondary" onClick={onTestProxy} disabled={testingProxy || !proxyUrl.trim()}>
-            {testingProxy ? <Loader2 className="animate-spin" size={16} /> : <Zap size={16} />}
-            Test Proxy
-          </Button>
-          <Button variant="secondary" onClick={onSaveProxy} disabled={savingProxy}>
-            {savingProxy ? <Loader2 className="animate-spin" size={16} /> : <Settings2 size={16} />}
-            Save Proxy
-          </Button>
-        </div>
-        <label className="flex min-h-10 items-center gap-3 rounded-md border border-border bg-background px-3 text-xs font-black uppercase tracking-wide text-muted-foreground sm:col-span-2">
-          <input type="checkbox" checked={vpnEnabled} onChange={(event) => setVpnEnabled(event.target.checked)} className="h-4 w-4 accent-[hsl(var(--primary))]" />
-          Use OpenVPN for Dola browser submit
-        </label>
-        <Field label="VPN usernames" className="sm:col-span-2">
-          <Textarea value={vpnUsernames} onChange={(event) => setVpnUsernames(event.target.value)} placeholder="One username per line" rows={3} />
-        </Field>
-        <Field label={settings.vpn_password_saved ? "VPN shared password (saved)" : "VPN shared password"} className="sm:col-span-2">
-          <Input type="password" value={vpnPassword} onChange={(event) => setVpnPassword(event.target.value)} placeholder={settings.vpn_password_saved ? "Leave blank to keep saved password" : "Shared VPN password"} />
-        </Field>
-        <div className="grid gap-2 sm:col-span-2">
-          <input ref={vpnFileRef} type="file" accept=".ovpn" multiple className="hidden" onChange={(event) => onUploadVpnFiles(event.target.files)} />
-          <div className="grid grid-cols-3 gap-2">
-            <Button variant="secondary" onClick={() => vpnFileRef.current?.click()}>
-              <Upload size={16} />
-              Upload .ovpn
-            </Button>
-            <Button variant="secondary" onClick={onTestVpn} disabled={testingVpn || !vpnUsernames.trim()}>
-              {testingVpn ? <Loader2 className="animate-spin" size={16} /> : <Zap size={16} />}
-              Test VPN
-            </Button>
-            <Button variant="secondary" onClick={onRefreshVpn}>
-              <Settings2 size={16} />
-              Refresh VPN
-            </Button>
-          </div>
-          <div className="rounded-md border border-border bg-background p-3 text-[11px] font-semibold text-muted-foreground">
-            <div className="truncate">
-              VPN: {vpnEnabled ? "enabled" : "disabled"} {vpnStatus?.connected ? `- connected ${vpnStatus.config_name || ""} ${vpnStatus.ip || ""}` : "- disconnected"}
-            </div>
-            <div className="mt-2 flex flex-wrap gap-2">
-              {vpnConfigs.length ? vpnConfigs.map((config) => (
-                <span key={config.name} className="inline-flex max-w-full items-center gap-2 rounded-md bg-muted px-2 py-1">
-                  <span className="truncate">{config.name}</span>
-                  <button type="button" onClick={() => onDeleteVpnConfig(config.name)} className="text-red-300 hover:text-red-200">delete</button>
-                </span>
-              )) : <span>No .ovpn configs uploaded</span>}
-            </div>
-            {vpnEnabled && proxyEnabled && <div className="mt-2 text-yellow-300">VPN active: browser proxy will be skipped.</div>}
-          </div>
-        </div>
         <div className="rounded-md border border-border bg-background p-3 sm:col-span-2">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div className="min-w-0">
-              <div className="text-[11px] font-black uppercase tracking-wide text-muted-foreground">Dola Browser</div>
+              <div className="text-[11px] font-black uppercase tracking-wide text-muted-foreground">Network</div>
               <div className="mt-1 truncate text-xs font-bold text-foreground">
-                {browserStatus?.ok ? "Connected" : "Disconnected"} - mode {settings.dola_mode}
+                Mode: {networkModeLabel(settings)} - Dola browser {browserStatus?.ok ? "connected" : "disconnected"}
               </div>
               <div className="mt-1 truncate text-[11px] font-semibold text-muted-foreground">{browserStatus?.page_url || browserStatus?.error || "Browser status unavailable"}</div>
               <div className="mt-1 truncate text-[11px] font-semibold text-muted-foreground">

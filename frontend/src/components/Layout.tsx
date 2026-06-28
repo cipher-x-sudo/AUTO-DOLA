@@ -1,4 +1,4 @@
-import { FileVideo, GalleryHorizontalEnd, History, Loader2, Moon, Sparkles, Wand2 } from "lucide-react"
+import { FileVideo, GalleryHorizontalEnd, History, Loader2, Moon, Settings2, Sparkles, Wand2 } from "lucide-react"
 import { Button } from "./ui"
 
 const nav = [
@@ -6,6 +6,7 @@ const nav = [
   ["prompts", "/prompt-generator", Wand2, "Prompt Generator"],
   ["gallery", "/gallery", GalleryHorizontalEnd, "Gallery"],
   ["history", "/history", History, "History"],
+  ["settings", "/settings", Settings2, "Settings"],
 ] as const
 
 export function Layout({ page, setPage, loading, children }: { page: string; setPage: (page: string) => void; loading?: boolean; children: React.ReactNode }) {

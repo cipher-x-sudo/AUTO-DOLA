@@ -76,6 +76,10 @@ def save_app_settings(session: Session, value: dict[str, Any]) -> dict[str, Any]
     next_value = {**current, **value}
     if not value.get("vpn_password") and current.get("vpn_password"):
         next_value["vpn_password"] = current.get("vpn_password", "")
+    if next_value.get("vpn_enabled"):
+        next_value["proxy_enabled"] = False
+    elif next_value.get("proxy_enabled"):
+        next_value["vpn_enabled"] = False
     next_value.pop("vpn_password_saved", None)
     set_setting(session, "app_settings", next_value)
     return load_app_settings(session)
