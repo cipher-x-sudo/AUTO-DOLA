@@ -445,14 +445,16 @@ function SettingsPage({
   const [saving, setSaving] = useState(false)
   const [testingProxy, setTestingProxy] = useState(false)
   const [testingVpn, setTestingVpn] = useState(false)
+  const [settingsDirty, setSettingsDirty] = useState(false)
   const vpnFileRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
+    if (settingsDirty) return
     setNetworkMode(settings.vpn_enabled ? "vpn" : settings.proxy_enabled ? "proxy" : "direct")
     setProxyUrl(settings.proxy_url || "")
     setVpnUsernames(settings.vpn_usernames || "")
     setVpnPassword("")
-  }, [settings])
+  }, [settings, settingsDirty])
 
   useEffect(() => {
     refreshVpn()
@@ -469,6 +471,7 @@ function SettingsPage({
         vpn_usernames: vpnUsernames,
         vpn_password: vpnPassword,
       })
+      setSettingsDirty(false)
       onSettingsSaved(saved)
       toast.success("Network settings saved")
       onRefresh()
@@ -531,7 +534,9 @@ function SettingsPage({
   async function testVpn() {
     setTestingVpn(true)
     try {
-      await api.saveSettings({ ...settings, proxy_enabled: false, vpn_enabled: true, vpn_usernames: vpnUsernames, vpn_password: vpnPassword })
+      const saved = await api.saveSettings({ ...settings, proxy_enabled: false, vpn_enabled: true, vpn_usernames: vpnUsernames, vpn_password: vpnPassword })
+      setSettingsDirty(false)
+      onSettingsSaved(saved)
       const result = await api.testVpn()
       toast.success(result.ip ? `VPN reachable: ${result.ip}` : "VPN reachable")
       refreshVpn()
@@ -556,7 +561,10 @@ function SettingsPage({
             <button
               key={mode}
               type="button"
-              onClick={() => setNetworkMode(mode)}
+              onClick={() => {
+                setNetworkMode(mode)
+                setSettingsDirty(true)
+              }}
               className={`h-11 rounded-md border text-xs font-black uppercase tracking-wide ${
                 networkMode === mode ? "border-primary bg-primary text-primary-foreground" : "border-border bg-background text-muted-foreground hover:bg-muted"
               }`}
@@ -569,7 +577,10 @@ function SettingsPage({
         {networkMode === "proxy" && (
           <div className="mt-4 grid gap-3">
             <Field label="Proxy URL">
-              <Input value={proxyUrl} onChange={(event) => setProxyUrl(event.target.value)} placeholder="http://user:pass@host:port" />
+              <Input value={proxyUrl} onChange={(event) => {
+                setProxyUrl(event.target.value)
+                setSettingsDirty(true)
+              }} placeholder="http://user:pass@host:port" />
             </Field>
             <div className="grid grid-cols-2 gap-2">
               <Button variant="secondary" onClick={testProxy} disabled={testingProxy || !proxyUrl.trim()}>
@@ -587,10 +598,16 @@ function SettingsPage({
         {networkMode === "vpn" && (
           <div className="mt-4 grid gap-3">
             <Field label="VPN username">
-              <Input value={vpnUsernames} onChange={(event) => setVpnUsernames(event.target.value)} placeholder="Shared username for all VPN files" />
+              <Input value={vpnUsernames} onChange={(event) => {
+                setVpnUsernames(event.target.value)
+                setSettingsDirty(true)
+              }} placeholder="Shared username for all VPN files" />
             </Field>
             <Field label={settings.vpn_password_saved ? "VPN shared password (saved)" : "VPN shared password"}>
-              <Input type="password" value={vpnPassword} onChange={(event) => setVpnPassword(event.target.value)} placeholder={settings.vpn_password_saved ? "Leave blank to keep saved password" : "Shared VPN password"} />
+              <Input type="password" value={vpnPassword} onChange={(event) => {
+                setVpnPassword(event.target.value)
+                setSettingsDirty(true)
+              }} placeholder={settings.vpn_password_saved ? "Leave blank to keep saved password" : "Shared VPN password"} />
             </Field>
             <input ref={vpnFileRef} type="file" accept=".ovpn" multiple className="hidden" onChange={(event) => uploadVpnFiles(event.target.files)} />
             <div className="grid grid-cols-3 gap-2">
