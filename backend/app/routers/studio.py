@@ -5,6 +5,7 @@ from sqlmodel import Session, select
 from app.config import settings
 from app.database import get_session
 from app.models import Job, JobKind, LogEvent
+from app.schemas import JobRead
 from app.services.dola_browser import DolaBrowserClient
 from app.services.settings import load_public_settings
 
@@ -42,7 +43,10 @@ async def studio_status(session: Session = Depends(get_session)) -> dict:
         }
     )
     return {
-        "jobs": jobs,
+        "jobs": [
+            JobRead.model_validate(job, from_attributes=True).model_dump()
+            for job in jobs
+        ],
         "settings": app_settings,
         "logs": [row.model_dump() for row in logs],
         "browser": browser,

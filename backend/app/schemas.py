@@ -41,6 +41,7 @@ class JobItemRead(BaseModel):
     error: str | None
     diagnostic_json: dict[str, Any] = {}
     artifact_id: UUID | None
+    created_at: datetime
     updated_at: datetime
 
 

@@ -30,9 +30,16 @@ mkdir -p "${BROWSER_LOG_DIR:-/data/logs}"
 python3 /app/browser_manager.py >"${BROWSER_LOG_DIR:-/data/logs}/browser-manager.log" 2>&1 &
 MANAGER_PID=$!
 
+check_processes() {
+  local pid
+  for pid in "$@"; do
+    kill -0 "$pid" 2>/dev/null || return 1
+  done
+}
+
 deadline=$((SECONDS + 60))
 while ! curl -fsS http://127.0.0.1:7070/status >/dev/null 2>&1; do
-  kill -0 "$MANAGER_PID" "$XVFB_PID" "$X11VNC_PID" "$NOVNC_PID" || { echo "FATAL: browser service exited during startup" >&2; exit 1; }
+  check_processes "$MANAGER_PID" "$XVFB_PID" "$X11VNC_PID" "$NOVNC_PID" || { echo "FATAL: browser service exited during startup" >&2; exit 1; }
   (( SECONDS < deadline )) || { echo "FATAL: browser manager startup timed out" >&2; exit 1; }
   sleep 1
 done
@@ -40,5 +47,5 @@ done
 tail -F "${BROWSER_LOG_DIR:-/data/logs}/browser-manager.log" /data/logs/novnc.log &
 TAIL_PID=$!
 while sleep 5; do
-  kill -0 "$MANAGER_PID" "$XVFB_PID" "$FLUXBOX_PID" "$X11VNC_PID" "$NOVNC_PID" || { echo "FATAL: browser service stopped" >&2; kill "$TAIL_PID" 2>/dev/null || true; exit 1; }
+  check_processes "$MANAGER_PID" "$XVFB_PID" "$FLUXBOX_PID" "$X11VNC_PID" "$NOVNC_PID" || { echo "FATAL: browser service stopped" >&2; kill "$TAIL_PID" 2>/dev/null || true; exit 1; }
 done
