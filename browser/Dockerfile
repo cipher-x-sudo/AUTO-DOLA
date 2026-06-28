@@ -8,6 +8,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
         chromium \
+        docker.io \
         fluxbox \
         netcat-openbsd \
         novnc \
