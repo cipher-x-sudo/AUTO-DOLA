@@ -26,6 +26,7 @@ services:
     environment:
       VPN_CONFIG_DIR: /data/profiles/vpn
       BROWSER_SLOT_IMAGE: ${AUTO_DOLA_BROWSER_SLOT_IMAGE:-auto-dola-browser}
+      DOCKER_API_VERSION: "1.44"
     shm_size: "1gb"
     cap_add:
       - NET_ADMIN

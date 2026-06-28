@@ -748,7 +748,6 @@ class Handler(BaseHTTPRequestHandler):
                     str(payload.get("config_name") or ""),
                     str(payload.get("username") or ""),
                     str(payload.get("password") or ""),
-                    bool(payload.get("headless", browser_headless_enabled())),
                 )
                 json_response(self, 200, result)
                 return

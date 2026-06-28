@@ -8,7 +8,7 @@ from app.schemas import ProxyTestRequest, SettingsPayload, VpnTestRequest
 from app.services.proxy import test_proxy
 from app.services.settings import load_app_settings, load_public_settings, save_app_settings
 from app.services.vpn import browser_manager_vpn_request, choose_vpn_config, choose_vpn_username, delete_vpn_config, list_vpn_configs, save_vpn_config, vpn_config_path
-from app.services.dola_browser import DolaBrowserClient
+from app.services.dola_browser import DolaBrowserClient, DolaBrowserError
 
 router = APIRouter(prefix="/api", tags=["settings"])
 
@@ -103,7 +103,8 @@ async def vpn_test_isolated(payload: VpnTestRequest, session: Session = Depends(
             launch_payload = launch_response.json()
             if launch_response.is_error or not launch_payload.get("ok", True):
                 raise ValueError(str(launch_payload.get("error") or "CHROMIUM_LAUNCH_FAILED"))
-            cdp_url = str(launch_payload.get("container_cdp_url") or launch_payload.get("cdp_url") or "")
+            browser_slot = launch_payload.get("slot") if isinstance(launch_payload.get("slot"), dict) else {}
+            cdp_url = str(browser_slot.get("container_cdp_url") or browser_slot.get("cdp_url") or "")
             if not cdp_url:
                 raise ValueError("CDP_URL_MISSING")
             cdp_response = await http.get(f"{cdp_url.rstrip('/')}/json/version")
@@ -117,6 +118,8 @@ async def vpn_test_isolated(payload: VpnTestRequest, session: Session = Depends(
             "cdp": True,
             "log_urls": slot.get("log_urls") or {},
         }
+    except DolaBrowserError as exc:
+        raise HTTPException(status_code=502, detail={"error": exc.error_type, "message": str(exc), "diagnostic": exc.diagnostic}) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     finally:
