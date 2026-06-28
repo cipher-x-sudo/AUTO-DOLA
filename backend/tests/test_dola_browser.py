@@ -825,6 +825,63 @@ async def test_launch_slot_converts_manager_500_to_browser_error(monkeypatch: py
 
 
 @pytest.mark.asyncio
+async def test_launch_isolated_vpn_slot_converts_manager_500_to_browser_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    class FakeResponse:
+        status_code = 500
+        is_error = True
+        text = "failed"
+
+        def json(self) -> dict[str, object]:
+            return {
+                "ok": False,
+                "error": "CHROMIUM_LAUNCH_FAILED",
+                "detail": "Browser CDP port 9300 did not open.",
+                "slot_id": "vpn-slot-1",
+                "container_name": "auto-dola-vpn-slot-1",
+                "config_name": "hk.ovpn",
+                "log_snippet": "chrome failed",
+            }
+
+    class CloseResponse:
+        status_code = 200
+        is_error = False
+        text = "{}"
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, bool]:
+            return {"closed": True}
+
+    class FakeAsyncClient:
+        async def __aenter__(self) -> "FakeAsyncClient":
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            pass
+
+        async def post(self, url: str, json: dict[str, object]) -> object:
+            calls.append((url, json))
+            if url.endswith("/vpn-slot/close"):
+                return CloseResponse()
+            return FakeResponse()
+
+    monkeypatch.setattr(dola_browser.httpx, "AsyncClient", lambda **_kwargs: FakeAsyncClient())
+    client = DolaBrowserClient(manager_url="http://browser-manager:7070")
+
+    with pytest.raises(DolaBrowserError) as exc:
+        await client.launch_isolated_vpn_slot(config_path="/data/profiles/vpn/hk.ovpn", config_name="hk.ovpn", username="user", password="pass")
+
+    assert exc.value.error_type == "CHROMIUM_LAUNCH_FAILED"
+    assert exc.value.diagnostic["manager_status"] == 500
+    assert exc.value.diagnostic["container_name"] == "auto-dola-vpn-slot-1"
+    assert exc.value.diagnostic["body"] == "chrome failed"
+    assert calls[-1][0].endswith("/vpn-slot/close")
+
+
+@pytest.mark.asyncio
 async def test_delete_profile_calls_browser_manager(monkeypatch: pytest.MonkeyPatch) -> None:
     class FakeResponse:
         def raise_for_status(self) -> None:

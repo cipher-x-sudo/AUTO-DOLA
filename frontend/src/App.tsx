@@ -767,6 +767,20 @@ function GenerationSettings({
           <input type="checkbox" checked={cleanWatermark} onChange={(event) => setCleanWatermark(event.target.checked)} className="h-4 w-4 accent-[hsl(var(--primary))]" />
           Clean watermark after download
         </label>
+        <div className="flex min-h-10 flex-col gap-3 rounded-md border border-border bg-background px-3 py-3 sm:col-span-2 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <div className="text-xs font-black uppercase tracking-wide text-muted-foreground">Browser Mode</div>
+            <div className="mt-1 text-[11px] font-semibold text-muted-foreground">Applies to all generation browser submits.</div>
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <Button variant={!settings.browser_headless ? "default" : "secondary"} className="h-8 px-3 text-xs" onClick={() => onSetBrowserHeadless(false)}>
+              Visible
+            </Button>
+            <Button variant={settings.browser_headless ? "default" : "secondary"} className="h-8 px-3 text-xs" onClick={() => onSetBrowserHeadless(true)}>
+              Headless
+            </Button>
+          </div>
+        </div>
         <Field label="Save output" className="sm:col-span-2">
           <Select value={saveMode} onChange={(event) => setSaveMode(event.target.value)}>
             <option value="final">Final only, raw only if cleanup fails</option>
@@ -792,9 +806,6 @@ function GenerationSettings({
                 Browser VPN: {browserStatus?.browser_vpn_active ? `active ${browserStatus.browser_vpn_config || ""} ${browserStatus.browser_vpn_ip || ""}` : "inactive"}
                 {typeof browserStatus?.active_vpn_browser_count === "number" ? ` - isolated slots ${browserStatus.active_vpn_browser_count}` : ""}
               </div>
-              <div className="mt-1 truncate text-[11px] font-semibold text-muted-foreground">
-                Browser mode: {settings.browser_headless ? "Headless" : "Visible"}
-              </div>
               {(browserStatus?.last_submit_endpoint || browserStatus?.last_dola_error) && (
                 <div className="mt-1 truncate text-[11px] font-semibold text-muted-foreground">
                   Last submit: {browserStatus.last_submit_endpoint || "none"} {browserStatus.last_dola_error ? `- ${browserStatus.last_dola_error}` : ""}
@@ -802,10 +813,6 @@ function GenerationSettings({
               )}
             </div>
             <div className="flex shrink-0 flex-wrap gap-2">
-              <Button variant="secondary" className="h-9 px-3 text-xs" onClick={() => onSetBrowserHeadless(!settings.browser_headless)}>
-                <Settings2 size={14} />
-                {settings.browser_headless ? "Headless" : "Visible"}
-              </Button>
               <Button variant="secondary" className="h-9 px-3 text-xs text-red-200 hover:text-red-100" onClick={onKillAllSlots}>
                 <Square size={14} />
                 Kill All Slots

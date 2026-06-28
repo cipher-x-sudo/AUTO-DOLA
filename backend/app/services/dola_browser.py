@@ -335,12 +335,41 @@ class DolaBrowserClient:
                     "headless": self.headless,
                 },
             )
-            response.raise_for_status()
-            payload = response.json()
+            try:
+                payload = response.json()
+            except ValueError:
+                payload = {"ok": False, "error": response.text}
+            if response.is_error:
+                error_type = str(payload.get("error") or "VPN_SLOT_LAUNCH_FAILED")
+                slot_id = str(payload.get("slot_id") or "")
+                container_name = str(payload.get("container_name") or "")
+                if slot_id or container_name:
+                    await self.close_isolated_vpn_slot(slot_id=slot_id, container_name=container_name)
+                raise DolaBrowserError(
+                    f"VPN browser slot launch failed: {error_type}",
+                    {
+                        "cdp": False,
+                        "error_msg": payload.get("detail") or payload.get("error") or response.text,
+                        "manager_status": response.status_code,
+                        "slot_id": slot_id,
+                        "container_name": container_name,
+                        "config_name": payload.get("config_name") or config_name,
+                        "body": payload.get("log_snippet") or "",
+                    },
+                    error_type,
+                )
         if not payload.get("ok"):
             raise DolaBrowserError(
                 f"OpenVPN browser slot failed: {payload.get('error')}",
-                {"cdp": False, "error_msg": payload.get("error")},
+                {
+                    "cdp": False,
+                    "error_msg": payload.get("detail") or payload.get("error"),
+                    "manager_status": response.status_code,
+                    "slot_id": payload.get("slot_id"),
+                    "container_name": payload.get("container_name"),
+                    "config_name": payload.get("config_name") or config_name,
+                    "body": payload.get("log_snippet") or "",
+                },
                 str(payload.get("error") or "VPN_SLOT_LAUNCH_FAILED"),
             )
         return payload
