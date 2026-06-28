@@ -4,12 +4,13 @@ set -euo pipefail
 mkdir -p "$CHROME_PROFILE_DIR" /data/logs
 rm -rf "$CHROME_PROFILE_DIR"/slots
 rm -f "$CHROME_PROFILE_DIR"/SingletonLock "$CHROME_PROFILE_DIR"/SingletonSocket "$CHROME_PROFILE_DIR"/SingletonCookie
+rm -f "/tmp/.X${DISPLAY#:}-lock" "/tmp/.X11-unix/X${DISPLAY#:}"
 
 test -c /dev/net/tun || { echo "FATAL: /dev/net/tun is unavailable" >&2; exit 1; }
 if [[ "${ISOLATED_VPN_SLOT:-0}" != "1" ]]; then
   test -S /var/run/docker.sock || { echo "FATAL: Docker socket is unavailable" >&2; exit 1; }
 fi
-for command in Xvfb fluxbox x11vnc websockify python3 chromium openvpn docker; do
+for command in Xvfb fluxbox x11vnc websockify python3 chromium openvpn docker curl; do
   command -v "$command" >/dev/null || { echo "FATAL: required command missing: $command" >&2; exit 1; }
 done
 
