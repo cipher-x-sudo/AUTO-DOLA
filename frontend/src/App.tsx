@@ -305,7 +305,7 @@ function VideoConsole({
   const primaryDisplayJob = displayJobs.at(-1) ?? activeJob
   const displayJobIds = useMemo(() => new Set(displayJobs.map((job) => job.id)), [displayJobs])
   const displayLogs = useMemo(
-    () => logs.filter((row) => !row.job_id || displayJobIds.has(row.job_id)),
+    () => logs.filter((row) => Boolean(row.job_id) && displayJobIds.has(String(row.job_id))),
     [displayJobIds, logs],
   )
   const queueRows = useMemo(
