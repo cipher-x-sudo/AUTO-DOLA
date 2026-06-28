@@ -18,7 +18,7 @@ import {
   Zap,
 } from "lucide-react"
 import { toast } from "sonner"
-import { api, artifactUrl, browserScreenshotUrl, subscribeJobEvents } from "@/lib/api"
+import { API_BASE, api, artifactUrl, browserScreenshotUrl, subscribeJobEvents } from "@/lib/api"
 import type { Artifact, DolaBrowserStatus, Job, JobItem, Niche, NichePromptGroup, SettingsPayload } from "@/lib/types"
 import { Layout } from "@/components/Layout"
 import { JobTable } from "@/components/JobTable"
@@ -575,6 +575,21 @@ function SettingsPage({
     }
   }
 
+  async function testIsolatedVpn() {
+    setTestingVpn(true)
+    try {
+      const saved = await api.saveSettings({ ...settings, proxy_enabled: false, vpn_enabled: true, vpn_usernames: vpnUsernames, vpn_password: vpnPassword })
+      setSettingsDirty(false)
+      onSettingsSaved(saved)
+      const result = await api.testIsolatedVpn()
+      toast.success(`Isolated VPN slot ready${result.ip ? `: ${result.ip}` : ""}`)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Isolated VPN slot test failed")
+    } finally {
+      setTestingVpn(false)
+    }
+  }
+
   return (
     <div className="mx-auto max-w-[1100px] space-y-5">
       <div className="border-b border-border/70 pb-4">
@@ -638,7 +653,7 @@ function SettingsPage({
               }} placeholder={settings.vpn_password_saved ? "Leave blank to keep saved password" : "Shared VPN password"} />
             </Field>
             <input ref={vpnFileRef} type="file" accept=".ovpn" multiple className="hidden" onChange={(event) => uploadVpnFiles(event.target.files)} />
-            <div className="grid grid-cols-3 gap-2">
+            <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
               <Button variant="secondary" onClick={() => vpnFileRef.current?.click()}>
                 <Upload size={16} />
                 Upload .ovpn
@@ -646,6 +661,10 @@ function SettingsPage({
               <Button variant="secondary" onClick={testVpn} disabled={testingVpn || !vpnUsernames.trim()}>
                 {testingVpn ? <Loader2 className="animate-spin" size={16} /> : <Zap size={16} />}
                 Test VPN
+              </Button>
+              <Button variant="secondary" onClick={testIsolatedVpn} disabled={testingVpn || !vpnUsernames.trim()}>
+                {testingVpn ? <Loader2 className="animate-spin" size={16} /> : <Zap size={16} />}
+                Test Isolated Slot
               </Button>
               <Button variant="secondary" onClick={saveNetworkSettings} disabled={saving}>
                 {saving ? <Loader2 className="animate-spin" size={16} /> : <Settings2 size={16} />}
@@ -1623,6 +1642,7 @@ function BrowserDiagnosticDetails({ diagnostic, browserUrl }: { diagnostic: Reco
   const entries = visibleDiagnosticEntries(diagnostic)
   const screenshotFilename = typeof diagnostic.screenshot_filename === "string" ? diagnostic.screenshot_filename : ""
   const copyText = entries.map(([key, value]) => `${diagnosticLabel(key)}: ${formatDiagnosticValue(value)}`).join("\n")
+  const logUrls = typeof diagnostic.log_urls === "object" && diagnostic.log_urls !== null ? diagnostic.log_urls as Record<string, string> : {}
 
   async function copyDiagnostics() {
     await navigator.clipboard.writeText(copyText)
@@ -1636,9 +1656,12 @@ function BrowserDiagnosticDetails({ diagnostic, browserUrl }: { diagnostic: Reco
           <Badge tone="error">{String(diagnostic.error_type || "BROWSER_ERROR")}</Badge>
           <Button variant="secondary" className="h-7 px-2 text-[11px]" onClick={copyDiagnostics}><Copy size={13} />Copy diagnostics</Button>
           <a href={browserUrl} target="_blank" rel="noreferrer" className="inline-flex h-7 items-center rounded-md bg-muted px-2 text-[11px] font-semibold text-foreground">Open browser</a>
+          {Object.entries(logUrls).map(([name, url]) => (
+            <a key={name} href={`${API_BASE}${url}`} target="_blank" rel="noreferrer" className="inline-flex h-7 items-center rounded-md bg-muted px-2 text-[11px] font-semibold text-foreground">{diagnosticLabel(name)}</a>
+          ))}
         </div>
         <dl className="grid gap-x-4 gap-y-2 sm:grid-cols-[150px_minmax(0,1fr)]">
-          {entries.filter(([key]) => !["screenshot_filename", "screenshot_url", "captured_request"].includes(key)).map(([key, value]) => (
+          {entries.filter(([key]) => !["screenshot_filename", "screenshot_url", "captured_request", "log_urls"].includes(key)).map(([key, value]) => (
             <Fragment key={key}>
               <dt className="font-bold text-muted-foreground">{diagnosticLabel(key)}</dt>
               <dd className="min-w-0 whitespace-pre-wrap break-words font-mono text-foreground">{formatDiagnosticValue(value)}</dd>

@@ -345,16 +345,19 @@ class DolaBrowserClient:
                 container_name = str(payload.get("container_name") or "")
                 if slot_id or container_name:
                     await self.close_isolated_vpn_slot(slot_id=slot_id, container_name=container_name)
+                detail = str(payload.get("detail") or payload.get("error") or response.text)
+                concise_detail = next((line.strip() for line in reversed(detail.splitlines()) if line.strip()), error_type)
                 raise DolaBrowserError(
-                    f"VPN browser slot launch failed: {error_type}",
+                    f"VPN slot failed: {concise_detail}",
                     {
                         "cdp": False,
-                        "error_msg": payload.get("detail") or payload.get("error") or response.text,
+                        "error_msg": detail,
                         "manager_status": response.status_code,
                         "slot_id": slot_id,
                         "container_name": container_name,
                         "config_name": payload.get("config_name") or config_name,
                         "body": payload.get("log_snippet") or "",
+                        "log_urls": payload.get("log_urls") or {},
                     },
                     error_type,
                 )

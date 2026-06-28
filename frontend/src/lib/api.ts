@@ -33,6 +33,7 @@ export const api = {
   deleteVpnConfig: (name: string) => request<{ ok: boolean; deleted: boolean }>(`/api/vpn/configs/${encodeURIComponent(name)}`, { method: "DELETE" }),
   vpnStatus: () => request<{ ok: boolean; connected: boolean; config_name?: string; username_masked?: string; ip?: string; error?: string }>("/api/vpn/status"),
   testVpn: (config_name = "") => request<{ ok: boolean; connected: boolean; config_name?: string; username_masked?: string; ip?: string; ip_before?: string }>("/api/vpn/test", { method: "POST", body: JSON.stringify({ config_name }) }),
+  testIsolatedVpn: (config_name = "") => request<{ ok: boolean; slot_id: string; config_name?: string; username_masked?: string; ip?: string; cdp: boolean; log_urls?: Record<string, string> }>("/api/vpn/test-isolated", { method: "POST", body: JSON.stringify({ config_name }) }),
   ffmpeg: () => request<{ available: boolean; path: string }>("/api/system/ffmpeg"),
   chrome: () => request<{ available: boolean; path: string }>("/api/system/chrome"),
   dolaBrowser: () => request<DolaBrowserStatus>("/api/system/dola-browser"),

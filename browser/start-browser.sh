@@ -13,10 +13,11 @@ x11vnc -display "$DISPLAY" -forever -shared -nopw -rfbport 5900 >/data/logs/x11v
 
 websockify --web=/usr/share/novnc 0.0.0.0:6080 localhost:5900 >/data/logs/novnc.log 2>&1 &
 
-python3 /app/browser_manager.py >/data/logs/browser-manager.log 2>&1 &
+mkdir -p "${BROWSER_LOG_DIR:-/data/logs}"
+python3 /app/browser_manager.py >"${BROWSER_LOG_DIR:-/data/logs}/browser-manager.log" 2>&1 &
 
 while ! nc -z 127.0.0.1 7070; do
   sleep 1
 done
 
-tail -F /data/logs/browser-manager.log /data/logs/novnc.log
+tail -F "${BROWSER_LOG_DIR:-/data/logs}/browser-manager.log" /data/logs/novnc.log

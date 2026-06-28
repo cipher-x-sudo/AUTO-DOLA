@@ -1,4 +1,8 @@
-from fastapi import APIRouter, Depends
+import json
+import re
+
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import FileResponse
 from sqlmodel import Session
 
 from app.config import settings
@@ -9,6 +13,18 @@ from app.services.settings import load_public_settings
 from app.services.system import chrome_status, ffmpeg_status
 
 router = APIRouter(prefix="/api/system", tags=["system"])
+SLOT_ID_RE = re.compile(r"^vpn-slot-[a-f0-9]{32}$")
+SLOT_LOG_NAMES = {"docker.log", "openvpn.log", "chromium.log", "browser-manager.log"}
+
+
+def vpn_slot_log_dir(slot_id: str):
+    if not SLOT_ID_RE.fullmatch(slot_id):
+        raise HTTPException(status_code=400, detail="Invalid VPN slot ID")
+    root = (settings.log_dir / "vpn-slots").resolve()
+    path = (root / slot_id).resolve()
+    if root not in path.parents:
+        raise HTTPException(status_code=400, detail="Invalid VPN slot path")
+    return path
 
 
 @router.get("/ffmpeg")
@@ -51,3 +67,25 @@ async def kill_all_dola_browser_slots() -> dict:
         return await client.kill_all_slots()
     finally:
         await client.close()
+
+
+@router.get("/dola-browser/vpn-slots/{slot_id}/diagnostics")
+def get_vpn_slot_diagnostics(slot_id: str) -> dict:
+    path = vpn_slot_log_dir(slot_id) / "diagnostic.json"
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="VPN slot diagnostics not found")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=500, detail="VPN slot diagnostics are unreadable") from exc
+    return payload if isinstance(payload, dict) else {"detail": payload}
+
+
+@router.get("/dola-browser/vpn-slots/{slot_id}/logs/{log_name}")
+def get_vpn_slot_log(slot_id: str, log_name: str) -> FileResponse:
+    if log_name not in SLOT_LOG_NAMES:
+        raise HTTPException(status_code=400, detail="Invalid VPN slot log name")
+    path = vpn_slot_log_dir(slot_id) / log_name
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="VPN slot log not found")
+    return FileResponse(path, media_type="text/plain", filename=f"{slot_id}-{log_name}")

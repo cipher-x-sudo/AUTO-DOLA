@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import shutil
 from hmac import compare_digest
 from pathlib import Path
 from uuid import UUID
@@ -73,6 +74,14 @@ def clear_jobs(session: Session = Depends(get_session)) -> dict[str, int]:
     job_ids = list(session.exec(select(Job.id).where(Job.kind == JobKind.video)).all())
     if not job_ids:
         return {"deleted": 0}
+    items = list(session.exec(select(JobItem).where(JobItem.job_id.in_(job_ids))).all())  # type: ignore[arg-type]
+    slot_ids = {
+        str((item.diagnostic_json or {}).get("slot_id") or "")
+        for item in items
+        if re.fullmatch(r"vpn-slot-[a-f0-9]{32}", str((item.diagnostic_json or {}).get("slot_id") or ""))
+    }
+    for slot_id in slot_ids:
+        shutil.rmtree(settings.log_dir / "vpn-slots" / slot_id, ignore_errors=True)
     session.exec(delete(Artifact).where(Artifact.job_id.in_(job_ids)))  # type: ignore[arg-type]
     session.exec(delete(JobItem).where(JobItem.job_id.in_(job_ids)))  # type: ignore[arg-type]
     session.exec(delete(LogEvent).where(LogEvent.job_id.in_(job_ids)))  # type: ignore[arg-type]

@@ -11,6 +11,7 @@ import threading
 import time
 import tempfile
 import urllib.request
+import urllib.error
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -19,7 +20,8 @@ from urllib.parse import unquote, urlparse
 
 DISPLAY = os.environ.get("DISPLAY", ":99")
 BASE_PROFILE_DIR = Path(os.environ.get("CHROME_PROFILE_DIR", "/data/browser-profile"))
-LOG_DIR = Path("/data/logs")
+LOG_DIR = Path(os.environ.get("BROWSER_LOG_DIR", "/data/logs"))
+VPN_SLOT_LOG_ROOT = Path("/data/logs/vpn-slots")
 VPN_DIR = Path(os.environ.get("VPN_CONFIG_DIR", "/data/profiles/vpn"))
 SLOT_IMAGE = os.environ.get("BROWSER_SLOT_IMAGE", "auto-dola-browser")
 SLOT_PROFILE_VOLUME = os.environ.get("BROWSER_SLOT_PROFILE_VOLUME", "")
@@ -54,6 +56,28 @@ class VpnSlotLaunchError(RuntimeError):
         self.detail = detail
         self.slot_id = slot_id
         self.container_name = container_name
+
+
+class ManagerRequestError(RuntimeError):
+    def __init__(self, payload: dict) -> None:
+        super().__init__(str(payload.get("error") or "VPN_SLOT_MANAGER_ERROR"))
+        self.payload = payload
+
+
+def write_slot_diagnostics(slot_id: str, payload: dict, docker_output: str = "") -> dict[str, str]:
+    directory = VPN_SLOT_LOG_ROOT / slot_id
+    directory.mkdir(parents=True, exist_ok=True)
+    safe_payload = {key: value for key, value in payload.items() if key not in {"password", "username"}}
+    (directory / "diagnostic.json").write_text(json.dumps(safe_payload, indent=2), encoding="utf-8")
+    if docker_output:
+        (directory / "docker.log").write_text(docker_output, encoding="utf-8")
+    return {
+        "diagnostics": f"/api/system/dola-browser/vpn-slots/{slot_id}/diagnostics",
+        "docker": f"/api/system/dola-browser/vpn-slots/{slot_id}/logs/docker.log",
+        "openvpn": f"/api/system/dola-browser/vpn-slots/{slot_id}/logs/openvpn.log",
+        "chromium": f"/api/system/dola-browser/vpn-slots/{slot_id}/logs/chromium.log",
+        "browser_manager": f"/api/system/dola-browser/vpn-slots/{slot_id}/logs/browser-manager.log",
+    }
 
 
 def docker_available() -> bool:
@@ -116,12 +140,19 @@ def manager_post(url: str, endpoint: str, payload: dict, timeout: float = 120.0)
         headers={"content-type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        data = json.loads(response.read().decode())
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            data = json.loads(response.read().decode())
+    except urllib.error.HTTPError as exc:
+        try:
+            data = json.loads(exc.read().decode())
+        except Exception:
+            data = {"error": f"HTTP_{exc.code}", "detail": str(exc)}
+        raise ManagerRequestError(data if isinstance(data, dict) else {"error": "VPN_SLOT_MANAGER_ERROR"}) from exc
     if not isinstance(data, dict):
         raise RuntimeError("VPN_SLOT_MANAGER_ERROR")
     if not data.get("ok", True):
-        raise RuntimeError(str(data.get("error") or "VPN_SLOT_MANAGER_ERROR"))
+        raise ManagerRequestError(data)
     return data
 
 
@@ -132,6 +163,7 @@ def launch_isolated_vpn_slot(config_path: str, config_name: str, username: str, 
     slot_id = f"vpn-slot-{uuid.uuid4().hex}"
     container_name = f"auto-dola-{slot_id}"
     child_profile_root = f"/data/browser-profile/vpn-slots/{slot_id}"
+    child_log_root = f"/data/logs/vpn-slots/{slot_id}"
     network = current_network_name()
     profile_volume = mounted_volume_name("/data/browser-profile", SLOT_PROFILE_VOLUME)
     profiles_volume = mounted_volume_name("/data/profiles", SLOT_PROFILES_VOLUME)
@@ -155,6 +187,8 @@ def launch_isolated_vpn_slot(config_path: str, config_name: str, username: str, 
             f"CHROME_PROFILE_DIR={child_profile_root}",
             "-e",
             f"BROWSER_HEADLESS={'1' if headless else '0'}",
+            "-e",
+            f"BROWSER_LOG_DIR={child_log_root}",
             "-v",
             f"{profile_volume}:/data/browser-profile",
             "-v",
@@ -166,6 +200,14 @@ def launch_isolated_vpn_slot(config_path: str, config_name: str, username: str, 
     launch = subprocess.run(command, capture_output=True, text=True, check=False)
     if launch.returncode:
         detail = (launch.stderr or launch.stdout or f"docker exited with status {launch.returncode}").strip()
+        log_urls = write_slot_diagnostics(slot_id, {
+            "error": "VPN_SLOT_CONTAINER_LAUNCH_FAILED",
+            "detail": detail,
+            "docker_exit_code": launch.returncode,
+            "slot_id": slot_id,
+            "container_name": container_name,
+            "config_name": config_name or config.name,
+        }, f"stdout:\n{launch.stdout}\n\nstderr:\n{launch.stderr}")
         raise VpnSlotLaunchError("VPN_SLOT_CONTAINER_LAUNCH_FAILED", detail, slot_id, container_name)
     manager_url = f"http://{container_name}:7070"
     try:
@@ -181,9 +223,20 @@ def launch_isolated_vpn_slot(config_path: str, config_name: str, username: str, 
             },
             timeout=120,
         )
-    except Exception:
+    except Exception as exc:
+        docker_logs = subprocess.run(["docker", "logs", container_name], capture_output=True, text=True, check=False)
+        child_payload = exc.payload if isinstance(exc, ManagerRequestError) else {}
+        error = str(child_payload.get("error") or ("VPN_SLOT_MANAGER_TIMEOUT" if str(exc) == "VPN_SLOT_LAUNCH_FAILED" else "VPN_SLOT_LAUNCH_FAILED"))
+        detail = str(child_payload.get("detail") or exc)
+        write_slot_diagnostics(slot_id, {
+            "error": error,
+            "detail": detail,
+            "slot_id": slot_id,
+            "container_name": container_name,
+            "config_name": config_name or config.name,
+        }, f"stdout:\n{docker_logs.stdout}\n\nstderr:\n{docker_logs.stderr}")
         subprocess.call(["docker", "rm", "-f", container_name])
-        raise
+        raise VpnSlotLaunchError(error, detail, slot_id, container_name) from exc
     slot = {
         "ok": True,
         "slot_id": slot_id,
@@ -195,6 +248,13 @@ def launch_isolated_vpn_slot(config_path: str, config_name: str, username: str, 
         "username_masked": mask_username(username),
         "ip": vpn_result.get("ip", ""),
         "started_at": time.time(),
+        "log_urls": write_slot_diagnostics(slot_id, {
+            "ok": True,
+            "slot_id": slot_id,
+            "container_name": container_name,
+            "config_name": config_name or config.name,
+            "ip": vpn_result.get("ip", ""),
+        }),
     }
     with LOCK:
         VPN_SLOT_CONTAINERS[slot_id] = slot
@@ -414,7 +474,7 @@ def connect_vpn(config_path: str, config_name: str, username: str, password: str
     auth_handle = tempfile.NamedTemporaryFile("w", delete=False, prefix="openvpn-auth-", dir="/tmp", encoding="utf-8")
     auth_handle.write(f"{username}\n{password}\n")
     auth_handle.close()
-    log_path = LOG_DIR / f"openvpn-{int(time.time() * 1000)}.log"
+    log_path = LOG_DIR / ("openvpn.log" if os.environ.get("BROWSER_LOG_DIR") else f"openvpn-{int(time.time() * 1000)}.log")
     log_file = log_path.open("ab")
     process = subprocess.Popen(
         ["openvpn", "--config", str(config), "--auth-user-pass", auth_handle.name, "--verb", "3"],
@@ -483,7 +543,7 @@ def launch_slot(proxy_url: str = "", profile_dir: str = "", headless: bool | Non
         y = ((slot_number - 1) % 5) * 35
         headless_enabled = browser_headless_enabled() if headless is None else headless
         args = apply_headless_args(browser_launch_args(profile_path, port, x, y, proxy_url), headless_enabled)
-        log_path = LOG_DIR / f"chromium-{slot_id}.log"
+        log_path = LOG_DIR / ("chromium.log" if os.environ.get("BROWSER_LOG_DIR") else f"chromium-{slot_id}.log")
         log_file = log_path.open("ab")
         process = subprocess.Popen(args, stdout=log_file, stderr=log_file, env={**os.environ, "DISPLAY": DISPLAY})
         try:
@@ -509,9 +569,7 @@ def launch_slot(proxy_url: str = "", profile_dir: str = "", headless: bool | Non
                 log_file.close()
             except Exception:
                 pass
-            raise RuntimeError(
-                json.dumps(
-                    {
+            failure = {
                         "error": "CHROMIUM_LAUNCH_FAILED",
                         "detail": str(exc),
                         "slot_id": slot_id,
@@ -519,8 +577,9 @@ def launch_slot(proxy_url: str = "", profile_dir: str = "", headless: bool | Non
                         "log_file": str(log_path),
                         "log_snippet": tail_text(log_path),
                     }
-                )
-            ) from exc
+            if LOG_DIR.name.startswith("vpn-slot-"):
+                (LOG_DIR / "diagnostic.json").write_text(json.dumps(failure, indent=2), encoding="utf-8")
+            raise RuntimeError(json.dumps(failure)) from exc
         container_ip = socket.gethostbyname(socket.gethostname())
         slot = {
             "slot_id": slot_id,
@@ -734,10 +793,21 @@ class Handler(BaseHTTPRequestHandler):
                     "detail": exc.detail,
                     "slot_id": exc.slot_id,
                     "container_name": exc.container_name,
+                    "log_urls": write_slot_diagnostics(exc.slot_id, {
+                        "error": exc.error,
+                        "detail": exc.detail,
+                        "slot_id": exc.slot_id,
+                        "container_name": exc.container_name,
+                    }),
                 },
             )
         except Exception as exc:
-            json_response(self, 500, {"ok": False, "error": str(exc)})
+            try:
+                structured = json.loads(str(exc))
+            except (TypeError, ValueError):
+                structured = None
+            payload = {"ok": False, **structured} if isinstance(structured, dict) else {"ok": False, "error": str(exc)}
+            json_response(self, 500, payload)
 
     def log_message(self, format: str, *args: object) -> None:
         return
