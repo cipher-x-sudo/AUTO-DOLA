@@ -22,6 +22,12 @@ services:
   browser:
     build:
       context: ./browser
+    environment:
+      VPN_CONFIG_DIR: /data/profiles/vpn
+      BROWSER_SLOT_IMAGE: ${AUTO_DOLA_BROWSER_SLOT_IMAGE:-auto-dola-browser}
+      BROWSER_SLOT_PROFILE_VOLUME: ${AUTO_DOLA_BROWSER_PROFILE_VOLUME:-auto-dola_browser_profile}
+      BROWSER_SLOT_PROFILES_VOLUME: ${AUTO_DOLA_PROFILES_VOLUME:-auto-dola_profiles}
+      BROWSER_SLOT_LOGS_VOLUME: ${AUTO_DOLA_LOGS_VOLUME:-auto-dola_logs}
     shm_size: "1gb"
     cap_add:
       - NET_ADMIN
@@ -32,6 +38,7 @@ services:
       - "5900:5900"
       - "9222:7070"
     volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
       - auto_dola_browser_profile:/data/browser-profile
       - auto_dola_profiles:/data/profiles
       - auto_dola_logs:/data/logs
@@ -45,6 +52,7 @@ services:
       - path: .env
         required: false
     environment:
+      VPN_DIR: /data/profiles/vpn
       DATABASE_URL: postgresql+psycopg://autodola:autodola@postgres:5432/autodola
       REDIS_URL: redis://redis:6379/0
       OUTPUT_DIR: /data/downloads
@@ -85,6 +93,7 @@ services:
       - path: .env
         required: false
     environment:
+      VPN_DIR: /data/profiles/vpn
       DATABASE_URL: postgresql+psycopg://autodola:autodola@postgres:5432/autodola
       REDIS_URL: redis://redis:6379/0
       OUTPUT_DIR: /data/downloads
