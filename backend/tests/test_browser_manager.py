@@ -3,6 +3,8 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
+import pytest
+
 
 def load_browser_manager():
     module_path = Path(__file__).resolve().parents[2] / "browser" / "browser_manager.py"
@@ -243,6 +245,29 @@ def test_isolated_vpn_slot_uses_unique_child_profile_root(monkeypatch, tmp_path:
     assert slot["profile_root"].startswith("/data/browser-profile/vpn-slots/vpn-slot-")
     assert profile_env == f"CHROME_PROFILE_DIR={slot['profile_root']}"
     assert "BROWSER_HEADLESS=1" in command
+
+
+def test_isolated_vpn_slot_preserves_docker_stderr(monkeypatch, tmp_path: Path) -> None:
+    manager = load_browser_manager()
+    manager.VPN_DIR = tmp_path / "vpn"
+    manager.VPN_DIR.mkdir()
+    manager.VPN_SLOT_LOG_ROOT = tmp_path / "logs"
+    config = manager.VPN_DIR / "hk.ovpn"
+    config.write_text("client", encoding="utf-8")
+    monkeypatch.setattr(manager, "docker_available", lambda: True)
+    monkeypatch.setattr(manager, "current_network_name", lambda: "missing-network")
+    monkeypatch.setattr(manager, "mounted_volume_name", lambda *_args: "volume")
+    monkeypatch.setattr(
+        manager.subprocess,
+        "run",
+        lambda *_args, **_kwargs: type("Result", (), {"returncode": 125, "stdout": "", "stderr": "network missing-network not found"})(),
+    )
+
+    with pytest.raises(manager.VpnSlotLaunchError, match="VPN_SLOT_CONTAINER_LAUNCH_FAILED") as exc_info:
+        manager.launch_isolated_vpn_slot(str(config), config.name, "user", "pass")
+
+    diagnostic = manager.VPN_SLOT_LOG_ROOT / exc_info.value.slot_id / "diagnostic.json"
+    assert "network missing-network not found" in diagnostic.read_text(encoding="utf-8")
 
 
 def test_kill_all_closes_browser_slots_vpn_slots_and_vpn(monkeypatch) -> None:
