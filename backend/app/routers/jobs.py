@@ -15,11 +15,11 @@ from sqlmodel import Session, select
 from app.database import get_session
 from app.config import settings
 from app.events import hub, job_channel
-from app.models import Artifact, Job, JobItem, JobKind, JobStatus, LogEvent, utcnow
+from app.models import Artifact, ItemStatus, Job, JobItem, JobKind, JobStatus, LogEvent, utcnow
 from app.queue import enqueue_job, get_queue
 from app.schemas import JobRead, VideoJobCreate
 from app.services.cookie_snapshots import list_cookie_snapshot_metadata, read_cookie_snapshot, redact_cookie_snapshot_payload
-from app.services.jobs import log
+from app.services.jobs import log, recompute_job
 
 router = APIRouter(prefix="/api/video", tags=["video"])
 
@@ -151,6 +151,53 @@ def resume_item_poll(job_id: UUID, item_id: UUID, session: Session = Depends(get
     else:
         get_queue().enqueue("app.worker.resume_video_item_poll", str(job_id), str(item_id), job_timeout="6h", result_ttl=86400)
     log(session, f"Resume poll queued for video item {item_id}.", "info", job.id)
+    return {"ok": True, "queued": True}
+
+
+@router.post("/jobs/{job_id}/items/{item_id}/force-stop")
+def force_stop_item(job_id: UUID, item_id: UUID, session: Session = Depends(get_session)) -> dict[str, str | bool]:
+    job = get_job(job_id, session)
+    item = next((job_item for job_item in job.items if job_item.id == item_id), None)
+    if not item:
+        raise HTTPException(status_code=404, detail="Video item not found")
+    if item.status not in {ItemStatus.queued, ItemStatus.running}:
+        raise HTTPException(status_code=409, detail="Only queued or running video items can be force stopped")
+    item.status = ItemStatus.cancelled
+    item.action = "Force stopped"
+    item.error = None
+    item.updated_at = utcnow()
+    session.add(item)
+    session.commit()
+    recompute_job(session, job.id)
+    log(session, f"Force stop requested for video item {item_id}.", "warn", job.id)
+    return {"ok": True, "stopped": True}
+
+
+@router.post("/jobs/{job_id}/items/{item_id}/restart")
+def restart_item(job_id: UUID, item_id: UUID, session: Session = Depends(get_session)) -> dict[str, str | bool]:
+    job = get_job(job_id, session)
+    item = next((job_item for job_item in job.items if job_item.id == item_id), None)
+    if not item:
+        raise HTTPException(status_code=404, detail="Video item not found")
+    if item.status not in {ItemStatus.failed, ItemStatus.cancelled, ItemStatus.running, ItemStatus.completed}:
+        raise HTTPException(status_code=409, detail="Only failed, cancelled, running, or completed video items can be restarted")
+    item.status = ItemStatus.queued
+    item.action = "Restart queued"
+    item.error = None
+    item.diagnostic_json = {}
+    item.updated_at = utcnow()
+    job.status = JobStatus.queued
+    job.updated_at = utcnow()
+    session.add(item)
+    session.add(job)
+    session.commit()
+    if settings.auto_dola_inline_worker:
+        from app.worker import process_video_item
+
+        process_video_item(str(job_id), str(item_id))
+    else:
+        get_queue().enqueue("app.worker.process_video_item", str(job_id), str(item_id), job_timeout="6h", result_ttl=86400)
+    log(session, f"Restart queued for video item {item_id}. Existing artifact is kept until replacement succeeds.", "info", job.id)
     return {"ok": True, "queued": True}
 
 

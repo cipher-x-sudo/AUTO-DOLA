@@ -312,6 +312,28 @@ function VideoConsole({
     }
   }
 
+  async function forceStopItem(itemId: string) {
+    if (!activeJob) return
+    try {
+      await api.forceStopVideoItem(activeJob.id, itemId)
+      toast.success("Force stop requested")
+      onRefresh()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to force stop item")
+    }
+  }
+
+  async function restartItem(itemId: string) {
+    if (!activeJob) return
+    try {
+      await api.restartVideoItem(activeJob.id, itemId)
+      toast.success("Restart queued")
+      onRefresh()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to restart item")
+    }
+  }
+
 
   return (
     <div className="mx-auto max-w-[1760px] space-y-5">
@@ -358,6 +380,8 @@ function VideoConsole({
             items={queueItems}
             snapshots={activeJob?.dola_cookie_snapshots_json ?? []}
             onResumePoll={resumePoll}
+            onForceStop={forceStopItem}
+            onRestart={restartItem}
             browserUrl={browserStatus?.manual_url || "http://localhost:6080"}
           />
         </div>
@@ -770,11 +794,15 @@ function GenerationQueue({
   items,
   snapshots,
   onResumePoll,
+  onForceStop,
+  onRestart,
   browserUrl,
 }: {
   items: JobItem[]
   snapshots: Array<Record<string, unknown>>
   onResumePoll: (itemId: string) => void
+  onForceStop: (itemId: string) => void
+  onRestart: (itemId: string) => void
   browserUrl: string
 }) {
   const [page, setPage] = useState(1)
@@ -818,8 +846,10 @@ function GenerationQueue({
           <tbody>
             {pageItems.map((item, index) => {
               const canResume = hasSavedBrowserSnapshot(snapshots, item.id) && !item.artifact_id
+              const canForceStop = item.status === "queued" || item.status === "running"
+              const canRestart = item.status === "failed" || item.status === "cancelled" || item.status === "completed" || item.status === "running"
               const diagnostic = item.diagnostic_json ?? {}
-              const hasDiagnostic = Object.keys(diagnostic).length > 0
+              const hasDiagnostic = visibleDiagnosticEntries(diagnostic).length > 0
               return (
                 <Fragment key={item.id}>
                   <tr className="border-t border-border">
@@ -841,6 +871,16 @@ function GenerationQueue({
                         {canResume && (
                           <Button variant="secondary" className="h-7 shrink-0 px-2 text-[11px]" onClick={() => onResumePoll(item.id)}>
                             Resume Poll
+                          </Button>
+                        )}
+                        {canRestart && (
+                          <Button variant="secondary" className="h-7 shrink-0 px-2 text-[11px]" onClick={() => onRestart(item.id)}>
+                            Restart
+                          </Button>
+                        )}
+                        {canForceStop && (
+                          <Button variant="secondary" className="h-7 shrink-0 px-2 text-[11px] text-red-200 hover:text-red-100" onClick={() => onForceStop(item.id)}>
+                            Force Stop
                           </Button>
                         )}
                       </div>
@@ -1510,7 +1550,7 @@ function EngineTelemetry({ stats, state }: { stats: EngineTelemetryStats; state:
 }
 
 function BrowserDiagnosticDetails({ diagnostic, browserUrl }: { diagnostic: Record<string, unknown>; browserUrl: string }) {
-  const entries = Object.entries(diagnostic).filter(([, value]) => value !== null && value !== "" && (!Array.isArray(value) || value.length > 0))
+  const entries = visibleDiagnosticEntries(diagnostic)
   const screenshotFilename = typeof diagnostic.screenshot_filename === "string" ? diagnostic.screenshot_filename : ""
   const copyText = entries.map(([key, value]) => `${diagnosticLabel(key)}: ${formatDiagnosticValue(value)}`).join("\n")
 
@@ -1543,6 +1583,10 @@ function BrowserDiagnosticDetails({ diagnostic, browserUrl }: { diagnostic: Reco
       )}
     </div>
   )
+}
+
+function visibleDiagnosticEntries(diagnostic: Record<string, unknown>) {
+  return Object.entries(diagnostic).filter(([key, value]) => !key.startsWith("_") && value !== null && value !== "" && (!Array.isArray(value) || value.length > 0))
 }
 
 function diagnosticLabel(key: string) {

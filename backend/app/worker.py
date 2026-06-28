@@ -6,7 +6,7 @@ import shutil
 from pathlib import Path
 from typing import Callable
 from urllib.parse import urlparse
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import httpx
 from redis import Redis
@@ -67,8 +67,15 @@ def effective_video_parallel(value: object, max_parallel: int = MAX_DOLA_PARALLE
     return max(1, min(requested, max_parallel))
 
 
+ACTIVE_RUN_KEY = "_active_run_id"
+
+
 def process_job(job_id: str) -> None:
     asyncio.run(_process_job(UUID(job_id)))
+
+
+def process_video_item(job_id: str, item_id: str) -> None:
+    asyncio.run(_process_video_item(UUID(job_id), UUID(item_id)))
 
 
 async def _process_job(job_id: UUID) -> None:
@@ -100,7 +107,32 @@ async def _process_job(job_id: UUID) -> None:
             log(session, f"Job failed: {exc}", "error", job.id)
 
 
-async def process_video(session: Session, job: Job) -> None:
+async def _process_video_item(job_id: UUID, item_id: UUID) -> None:
+    with Session(engine) as session:
+        job = session.get(Job, job_id)
+        item = session.get(JobItem, item_id)
+        if not job or job.kind != JobKind.video:
+            return
+        if not item or item.job_id != job.id:
+            return
+        if job.status == JobStatus.cancelled:
+            job.status = JobStatus.running
+        else:
+            job.status = JobStatus.running
+        job.updated_at = utcnow()
+        session.add(job)
+        session.commit()
+        try:
+            await process_video(session, job, only_item_id=item_id)
+            recompute_job(session, job.id)
+        except Exception as exc:
+            current_item = session.get(JobItem, item_id)
+            if current_item and current_item.status not in {ItemStatus.completed, ItemStatus.cancelled}:
+                mark_item(session, current_item, ItemStatus.failed, "Restart failed", str(exc))
+            log(session, f"[Restart item | {item_id.hex[:8]}] Failed: {exc}", "error", job.id)
+
+
+async def process_video(session: Session, job: Job, only_item_id: UUID | None = None) -> None:
     app_settings = load_app_settings(session, include_secrets=True)
     config = job.config_json
     output_dir = Path(config.get("job_output_folder") or config.get("save_folder") or app_settings.get("output_dir") or settings.output_dir)
@@ -117,6 +149,7 @@ async def process_video(session: Session, job: Job) -> None:
     browser_client = DolaBrowserClient(proxy_url=proxy_url)
     items = session.exec(select(JobItem).where(JobItem.job_id == job.id).order_by(JobItem.created_at.asc(), JobItem.id.asc())).all()
     item_numbers = {item.id: index + 1 for index, item in enumerate(items)}
+    run_items = [item for item in items if only_item_id is None or item.id == only_item_id]
     requested_parallel = config.get("parallel", 1)
     parallel = effective_video_parallel(requested_parallel)
     log(session, f"Video concurrency requested: {requested_parallel}", "info", job.id)
@@ -127,13 +160,17 @@ async def process_video(session: Session, job: Job) -> None:
     browser_submit_semaphore = asyncio.Semaphore(1 if vpn_enabled else min(BROWSER_SUBMIT_PARALLEL, parallel))
 
     def ensure_not_cancelled(session_local: Session, item_id: UUID | None = None) -> JobItem | None:
+        session_local.expire_all()
         current_job = session_local.get(Job, job.id)
         if current_job is None or current_job.status == JobStatus.cancelled:
             current_item = session_local.get(JobItem, item_id) if item_id else None
             if current_item and current_item.status != ItemStatus.cancelled:
                 mark_item(session_local, current_item, ItemStatus.cancelled, "Force stopped")
             raise JobCancelled("Force stopped")
-        return session_local.get(JobItem, item_id) if item_id else None
+        current_item = session_local.get(JobItem, item_id) if item_id else None
+        if current_item and current_item.status == ItemStatus.cancelled:
+            raise JobCancelled("Force stopped")
+        return current_item
 
     async def _run_item(item: JobItem) -> None:
         async with semaphore:
@@ -145,6 +182,11 @@ async def process_video(session: Session, job: Job) -> None:
                     if db_item:
                         mark_item(session_local, db_item, ItemStatus.cancelled, "Force stopped")
                     return
+                run_id = uuid4().hex
+                db_item.diagnostic_json = {**(db_item.diagnostic_json or {}), ACTIVE_RUN_KEY: run_id}
+                db_item.updated_at = utcnow()
+                session_local.add(db_item)
+                session_local.commit()
                 last_error = ""
                 last_diagnostic: dict = {}
                 video_label = f"Video {item_numbers.get(db_item.id, 0)} | {db_item.id.hex[:8]}"
@@ -161,8 +203,18 @@ async def process_video(session: Session, job: Job) -> None:
                     return _log
 
                 def job_cancelled_or_missing() -> bool:
+                    session_local.expire_all()
                     current_job = session_local.get(Job, job.id)
-                    return current_job is None or current_job.status == JobStatus.cancelled
+                    current_item = session_local.get(JobItem, db_item.id)
+                    if current_job is None or current_job.status == JobStatus.cancelled:
+                        return True
+                    if current_item is None or current_item.status == ItemStatus.cancelled:
+                        return True
+                    return (current_item.diagnostic_json or {}).get(ACTIVE_RUN_KEY) != run_id
+
+                def ensure_current_run() -> None:
+                    if job_cancelled_or_missing():
+                        raise JobCancelled("Force stopped")
 
                 async def wait_before_retry(delay_seconds: float) -> bool:
                     remaining = delay_seconds
@@ -176,6 +228,7 @@ async def process_video(session: Session, job: Job) -> None:
                     return True
 
                 async def save_video_artifact(download_url: str, vid: str, action_prefix: str) -> None:
+                    ensure_current_run()
                     filename = unique_video_filename(output_dir, vid, db_item.title)
                     raw_path = output_dir / filename.replace(".mp4", "_raw.mp4")
                     final_path = output_dir / filename
@@ -192,6 +245,7 @@ async def process_video(session: Session, job: Job) -> None:
                         lambda action: mark_item(session_local, db_item, ItemStatus.running, f"{action_prefix}{action}"),
                     )
                     ensure_not_cancelled(session_local, db_item.id)
+                    ensure_current_run()
                     artifact = Artifact(job_id=job.id, item_id=db_item.id, kind="video", path=str(artifact_path), filename=artifact_path.name, mime_type="video/mp4", size_bytes=artifact_path.stat().st_size)
                     add_artifact(session_local, artifact, db_item)
                     mark_item(session_local, db_item, ItemStatus.completed, artifact_path.name)
@@ -199,6 +253,7 @@ async def process_video(session: Session, job: Job) -> None:
 
                 async def run_browser_generation(action_prefix: str, attempt: int) -> None:
                     ensure_not_cancelled(session_local, db_item.id)
+                    ensure_current_run()
                     mark_item(session_local, db_item, ItemStatus.running, f"{action_prefix}Submitting through Dola browser")
                     item_log("Connected to Dola browser fallback.", "info")
                     browser_slot_id = ""
@@ -252,6 +307,7 @@ async def process_video(session: Session, job: Job) -> None:
                         item_log(f"Dola browser: {message}", level)
 
                     async with browser_submit_semaphore:
+                        ensure_current_run()
                         if vpn_enabled:
                             if not app_settings.get("vpn_password"):
                                 raise DolaBrowserError("OpenVPN password is missing.", {"error_type": "VPN_AUTH_FAILED"}, "VPN_AUTH_FAILED")
@@ -270,6 +326,7 @@ async def process_video(session: Session, job: Job) -> None:
                             vpn_connected = True
                             item_log(f"VPN connected: config={vpn_status.get('config_name')}, user={vpn_status.get('username_masked')}, ip={vpn_status.get('ip')}", "success")
                         try:
+                            ensure_current_run()
                             browser_result = await browser_client.submit_and_capture_session(
                                 db_item.prompt,
                                 int(config.get("duration", 10)),
@@ -292,6 +349,7 @@ async def process_video(session: Session, job: Job) -> None:
                                 item_log("OpenVPN disconnected", "success")
                             raise
                     browser_slot_id = browser_result.slot_id
+                    ensure_current_run()
                     browser_profile_dir = str(browser_result.diagnostic.get("profile_dir") or "")
                     conversation_hint = browser_result.conversation_id[-8:] if len(browser_result.conversation_id) > 8 else browser_result.conversation_id
                     try:
@@ -337,6 +395,7 @@ async def process_video(session: Session, job: Job) -> None:
                         else:
                             item_log("Profile retained for fallback", "info")
                         mark_item(session_local, db_item, ItemStatus.running, f"{action_prefix}Polling video id 1/{VIDEO_POLL_ATTEMPTS}")
+                        ensure_current_run()
                         item_log("Polling direct HTTP 1/250", "info")
                         item_log("Polling video id with browser session over direct HTTP (proxy disabled).", "info")
 
@@ -420,11 +479,13 @@ async def process_video(session: Session, job: Job) -> None:
                     last_diagnostic = {}
                     try:
                         ensure_not_cancelled(session_local, db_item.id)
+                        ensure_current_run()
                         action_prefix = f"[{attempt}/{max_retries}] " if max_retries > 1 else ""
                         if effective_dola_mode == "browser":
                             await run_browser_generation(action_prefix, attempt)
                             return
                         mark_item(session_local, db_item, ItemStatus.running, f"{action_prefix}Building Dola session")
+                        ensure_current_run()
                         dola_session = await submit_client.build_session()
                         ensure_not_cancelled(session_local, db_item.id)
                         cookie_snapshot = create_cookie_snapshot(session_local, job.id, db_item.id, attempt, dola_session)
@@ -448,6 +509,7 @@ async def process_video(session: Session, job: Job) -> None:
                         payload = build_dola_payload(dola_session.payload_template, db_item.prompt, config.get("duration", 10), config.get("ratio", "9:16"))
                         ensure_not_cancelled(session_local, db_item.id)
                         mark_item(session_local, db_item, ItemStatus.running, f"{action_prefix}Submitting Seedance request")
+                        ensure_current_run()
                         submit_result = await submit_client.submit(dola_session, payload, raw_response_fn=record_raw_response, attempt=attempt)
                         ensure_not_cancelled(session_local, db_item.id)
                         conversation_id = submit_result.conversation_id
@@ -461,6 +523,7 @@ async def process_video(session: Session, job: Job) -> None:
                                 raise DolaTerminalGenerationError(f"Dola rejected this prompt: {assistant_message[:500]}")
                             item_log(f"Dola: {assistant_message}", "info")
                         mark_item(session_local, db_item, ItemStatus.running, f"{action_prefix}Processing video request")
+                        ensure_current_run()
                         vid = await poll_client.poll_video_id(
                             dola_session,
                             conversation_id,
@@ -481,6 +544,7 @@ async def process_video(session: Session, job: Job) -> None:
                                 return
                             raise RuntimeError("Dola did not return video id.")
                         mark_item(session_local, db_item, ItemStatus.running, f"{action_prefix}Polling download URL")
+                        ensure_current_run()
                         download_url = await poll_client.poll_download_url(
                             dola_session,
                             vid,
@@ -560,7 +624,7 @@ async def process_video(session: Session, job: Job) -> None:
                 session_local.close()
 
     try:
-        await asyncio.gather(*[_run_item(item) for item in items])
+        await asyncio.gather(*[_run_item(item) for item in run_items])
     finally:
         await submit_client.aclose()
         await poll_client.aclose()
