@@ -11,6 +11,7 @@ import {
   Search,
   Settings2,
   Square,
+  Star,
   Terminal,
   Trash2,
   Upload,
@@ -28,6 +29,7 @@ const DOCKER_OUTPUT_DIR = "/data/downloads"
 const HOST_OUTPUT_LABEL = import.meta.env.VITE_OUTPUT_LABEL ?? "Downloads/AUTO-DOLA"
 const PROMPT_UI_BATCH_SIZE = 5
 const QUEUE_PAGE_SIZE = 10
+const FAVORITE_NICHES_STORAGE_KEY = "auto-dola.favorite-niches.v1"
 const GEMINI_MODELS = [
   { value: "gemini-2.5-flash-lite", label: "Gemini 3.1 Flash Lite" },
   { value: "gemini-2.5-flash-thinking", label: "Gemini 3.1 Flash Lite (Thinking)" },
@@ -1194,7 +1196,7 @@ function PromptGenerator({
   onSettingsSaved: (settings: SettingsPayload) => void
   onUsePrompts: (text: string) => void
 }) {
-  const [sourceMode, setSourceMode] = useState<"manual" | "niches">("manual")
+  const [sourceMode, setSourceMode] = useState<"manual" | "niches">("niches")
   const [idea, setIdea] = useState("")
   const [count, setCount] = useState(5)
   const [countMode, setCountMode] = useState<"global" | "per_niche">("global")
@@ -1206,6 +1208,7 @@ function PromptGenerator({
   const [loadingNiches, setLoadingNiches] = useState(false)
   const [nicheSearch, setNicheSearch] = useState("")
   const [selectedNicheIds, setSelectedNicheIds] = useState<string[]>([])
+  const [favoriteNicheIds, setFavoriteNicheIds] = useState<string[]>(loadFavoriteNicheIds)
   const [generated, setGenerated] = useState<string[]>([])
   const [generatedGroups, setGeneratedGroups] = useState<NichePromptGroup[]>([])
   const [generating, setGenerating] = useState(false)
@@ -1226,11 +1229,17 @@ function PromptGenerator({
     [generated, generatedGroups],
   )
   const generationProgress = generationTarget ? Math.min(100, Math.round((allGeneratedPrompts.length / generationTarget) * 100)) : 0
+  const favoriteNicheIdSet = useMemo(() => new Set(favoriteNicheIds), [favoriteNicheIds])
   const filteredNiches = useMemo(() => {
     const query = nicheSearch.trim().toLowerCase()
-    if (!query) return niches
-    return niches.filter((niche) => `${niche.name} ${niche.filename}`.toLowerCase().includes(query))
-  }, [nicheSearch, niches])
+    const matching = query
+      ? niches.filter((niche) => `${niche.name} ${niche.filename}`.toLowerCase().includes(query))
+      : niches
+    return [
+      ...matching.filter((niche) => favoriteNicheIdSet.has(niche.id)),
+      ...matching.filter((niche) => !favoriteNicheIdSet.has(niche.id)),
+    ]
+  }, [favoriteNicheIdSet, nicheSearch, niches])
   const selectedNiches = useMemo(() => niches.filter((niche) => selectedNicheIds.includes(niche.id)), [niches, selectedNicheIds])
   const expectedPromptTotal = sourceMode === "niches" && countMode === "per_niche" ? count * selectedNicheIds.length : count
 
@@ -1239,6 +1248,10 @@ function PromptGenerator({
     setBaseUrl(settings.gemini_base_url || "https://generativelanguage.googleapis.com/v1beta")
     setModel(settings.gemini_model || "gemini-2.5-flash")
   }, [settings])
+
+  useEffect(() => {
+    window.localStorage.setItem(FAVORITE_NICHES_STORAGE_KEY, JSON.stringify(favoriteNicheIds))
+  }, [favoriteNicheIds])
 
   useEffect(() => {
     let alive = true
@@ -1449,6 +1462,14 @@ function PromptGenerator({
     setSelectedNicheIds((current) => (checked ? [...new Set([...current, id])] : current.filter((item) => item !== id)))
   }
 
+  function toggleFavoriteNiche(id: string) {
+    setFavoriteNicheIds((current) => (
+      current.includes(id)
+        ? current.filter((item) => item !== id)
+        : [...current, id]
+    ))
+  }
+
   function selectVisibleNiches() {
     setSelectedNicheIds((current) => [...new Set([...current, ...filteredNiches.map((niche) => niche.id)])])
   }
@@ -1555,20 +1576,35 @@ function PromptGenerator({
                   <Input className="pl-9" value={nicheSearch} onChange={(event) => setNicheSearch(event.target.value)} placeholder="Search local niches..." />
                 </div>
                 <div className="mt-3 max-h-[260px] space-y-2 overflow-auto rounded-md border border-border bg-background/60 p-2">
-                  {filteredNiches.map((niche) => (
-                    <label key={niche.id} className="flex cursor-pointer items-start gap-3 rounded-md px-2 py-2 text-sm hover:bg-muted/50">
-                      <input
-                        type="checkbox"
-                        checked={selectedNicheIds.includes(niche.id)}
-                        onChange={(event) => toggleNiche(niche.id, event.target.checked)}
-                        className="mt-1 h-4 w-4 accent-[hsl(var(--primary))]"
-                      />
-                      <span className="min-w-0">
-                        <span className="block truncate font-bold text-foreground">{niche.name}</span>
-                        <span className="block truncate text-xs text-muted-foreground">{niche.filename} - {formatBytes(niche.size_bytes)}</span>
-                      </span>
-                    </label>
-                  ))}
+                  {filteredNiches.map((niche) => {
+                    const isFavorite = favoriteNicheIdSet.has(niche.id)
+                    return (
+                      <div key={niche.id} className="flex items-center gap-1 rounded-md px-2 py-1 text-sm hover:bg-muted/50">
+                        <label className="flex min-w-0 flex-1 cursor-pointer items-start gap-3 py-1">
+                          <input
+                            type="checkbox"
+                            checked={selectedNicheIds.includes(niche.id)}
+                            onChange={(event) => toggleNiche(niche.id, event.target.checked)}
+                            className="mt-1 h-4 w-4 accent-[hsl(var(--primary))]"
+                          />
+                          <span className="min-w-0">
+                            <span className="block truncate font-bold text-foreground">{niche.name}</span>
+                            <span className="block truncate text-xs text-muted-foreground">{niche.filename} - {formatBytes(niche.size_bytes)}</span>
+                          </span>
+                        </label>
+                        <button
+                          type="button"
+                          aria-label={`${isFavorite ? "Remove" : "Add"} ${niche.name} ${isFavorite ? "from" : "to"} favorites`}
+                          aria-pressed={isFavorite}
+                          title={isFavorite ? "Remove from favorites" : "Add to favorites"}
+                          onClick={() => toggleFavoriteNiche(niche.id)}
+                          className={`inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md transition hover:bg-muted ${isFavorite ? "text-amber-400" : "text-muted-foreground hover:text-amber-400"}`}
+                        >
+                          <Star size={16} fill={isFavorite ? "currentColor" : "none"} />
+                        </button>
+                      </div>
+                    )
+                  })}
                   {loadingNiches && <div className="py-6 text-center text-sm text-muted-foreground">Loading local niches...</div>}
                   {!loadingNiches && !filteredNiches.length && <div className="py-6 text-center text-sm text-muted-foreground">No niche TXT files found.</div>}
                 </div>
@@ -1828,6 +1864,16 @@ function IconButton({ label, children, onClick }: { label: string; children: Rea
 
 function promptLines(text: string) {
   return text.split("\n").map((line) => line.trim()).filter(Boolean)
+}
+
+function loadFavoriteNicheIds(): string[] {
+  try {
+    const stored = JSON.parse(window.localStorage.getItem(FAVORITE_NICHES_STORAGE_KEY) || "[]")
+    if (!Array.isArray(stored)) return []
+    return [...new Set(stored.filter((item): item is string => typeof item === "string" && Boolean(item.trim())))]
+  } catch {
+    return []
+  }
 }
 
 function buildProgressivePromptRequest(masterIdea: string, previousPrompts: string[]) {
