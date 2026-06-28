@@ -95,6 +95,11 @@ interface VideoArtifact {
   job: Job
 }
 
+interface QueueRow extends JobItem {
+  jobId: string
+  jobCreatedAt: string
+}
+
 interface EngineTelemetryStats {
   total: number
   queued: number
@@ -217,13 +222,6 @@ export default function App() {
   }, [refresh, runningJobIds])
 
   const activeJob = useMemo(() => jobs.find((job) => job.status === "running" || job.status === "queued") ?? jobs[0], [jobs])
-  const activeLogs = useMemo(
-    () =>
-      logs
-        .filter((row) => !activeJob || row.job_id === activeJob.id)
-        .filter(isStudioLogVisible),
-    [activeJob, logs],
-  )
   const videos = useMemo(() => collectVideoArtifacts(jobs), [jobs])
 
   return (
@@ -234,7 +232,7 @@ export default function App() {
           settings={settings}
           jobs={jobs}
           activeJob={activeJob}
-          logs={activeLogs}
+          logs={logs}
           browserStatus={browserStatus}
           promptText={studioPromptText}
           setPromptText={setStudioPromptText}
@@ -298,25 +296,45 @@ function VideoConsole({
     setParallel((current) => current || settings.default_parallel || 30)
   }, [settings])
 
+  const displayJobs = useMemo(() => {
+    const activeJobs = jobs.filter((job) => ["queued", "running"].includes(job.status) && job.items.length > 0)
+    if (activeJobs.length) return [...activeJobs].sort(compareJobsOldestFirst)
+    const latestNonEmptyJob = jobs.find((job) => job.items.length > 0)
+    return latestNonEmptyJob ? [latestNonEmptyJob] : []
+  }, [jobs])
+  const primaryDisplayJob = displayJobs.at(-1) ?? activeJob
+  const displayJobIds = useMemo(() => new Set(displayJobs.map((job) => job.id)), [displayJobs])
+  const displayLogs = useMemo(
+    () => logs.filter((row) => !row.job_id || displayJobIds.has(row.job_id)),
+    [displayJobIds, logs],
+  )
+  const queueRows = useMemo(
+    () =>
+      displayJobs
+        .flatMap((job) => job.items.map((item) => ({ ...item, jobId: job.id, jobCreatedAt: job.created_at })))
+        .sort(compareQueueRows),
+    [displayJobs],
+  )
+  const displaySnapshots = useMemo(() => displayJobs.flatMap((job) => job.dola_cookie_snapshots_json ?? []), [displayJobs])
+
   const stats = useMemo(() => {
-    const items = stableJobItems(jobs.flatMap((job) => job.items))
+    const items = queueRows
     return {
       total: items.length,
       queued: items.filter((item) => item.status === "queued").length,
       generating: items.filter((item) => item.status === "running").length,
       done: items.filter((item) => item.status === "completed").length,
       failed: items.filter((item) => item.status === "failed").length,
-      videos: collectVideoArtifacts(jobs).length,
+      videos: displayJobs.flatMap((job) => job.artifacts).filter((artifact) => artifact.kind === "video").length,
     }
-  }, [jobs])
-  const telemetry = useMemo(() => buildEngineTelemetry(jobs, logs), [jobs, logs])
+  }, [displayJobs, queueRows])
+  const telemetry = useMemo(() => buildEngineTelemetry(displayJobs, displayLogs), [displayJobs, displayLogs])
   const telemetryState = telemetry.captchaBlock || telemetry.noTextbox || telemetry.browserEc ? "BLOCKED" : telemetry.queued || telemetry.generating ? "RUNNING" : "READY"
 
-  const progressTotal = activeJob?.total || stats.total || 0
-  const progressDone = activeJob ? activeJob.done + activeJob.failed : stats.done + stats.failed
+  const progressTotal = displayJobs.reduce((total, job) => total + job.total, 0)
+  const progressDone = displayJobs.reduce((total, job) => total + job.done + job.failed, 0)
   const progress = progressTotal ? Math.round((progressDone / progressTotal) * 100) : 0
-  const queueItems = stableJobItems(activeJob?.items ?? jobs.flatMap((job) => job.items))
-  const filteredLogs = logs
+  const filteredLogs = displayLogs
     .filter(isStudioLogVisible)
     .filter((row) => row.message.toLowerCase().includes(logSearch.toLowerCase()) || row.level.toLowerCase().includes(logSearch.toLowerCase()))
 
@@ -339,9 +357,10 @@ function VideoConsole({
   }
 
   async function stopGeneration() {
-    if (!activeJob || !["queued", "running"].includes(activeJob.status)) return
+    const activeDisplayJobs = displayJobs.filter((job) => ["queued", "running"].includes(job.status))
+    if (!activeDisplayJobs.length) return
     try {
-      await api.cancelVideoJob(activeJob.id)
+      await Promise.all(activeDisplayJobs.map((job) => api.cancelVideoJob(job.id)))
       await api.killAllDolaBrowserSlots()
       toast.success("Force stopped generation and killed browser/VPN slots")
       onRefresh()
@@ -382,10 +401,9 @@ function VideoConsole({
     }
   }
 
-  async function resumePoll(itemId: string) {
-    if (!activeJob) return
+  async function resumePoll(jobId: string, itemId: string) {
     try {
-      await api.resumeVideoItemPoll(activeJob.id, itemId)
+      await api.resumeVideoItemPoll(jobId, itemId)
       toast.success("Resume poll queued")
       onRefresh()
     } catch (error) {
@@ -393,10 +411,9 @@ function VideoConsole({
     }
   }
 
-  async function forceStopItem(itemId: string) {
-    if (!activeJob) return
+  async function forceStopItem(jobId: string, itemId: string) {
     try {
-      await api.forceStopVideoItem(activeJob.id, itemId)
+      await api.forceStopVideoItem(jobId, itemId)
       toast.success("Force stop requested")
       onRefresh()
     } catch (error) {
@@ -404,10 +421,9 @@ function VideoConsole({
     }
   }
 
-  async function restartItem(itemId: string) {
-    if (!activeJob) return
+  async function restartItem(jobId: string, itemId: string) {
     try {
-      await api.restartVideoItem(activeJob.id, itemId)
+      await api.restartVideoItem(jobId, itemId)
       toast.success("Restart queued")
       onRefresh()
     } catch (error) {
@@ -425,7 +441,7 @@ function VideoConsole({
         </div>
       </div>
 
-      <OutputLocation path={activeJobOutputLabel(activeJob) || HOST_OUTPUT_LABEL} containerPath={activeJobOutputContainer(activeJob) || DOCKER_OUTPUT_DIR} basePath={HOST_OUTPUT_LABEL} />
+      <OutputLocation path={activeJobOutputLabel(primaryDisplayJob) || HOST_OUTPUT_LABEL} containerPath={activeJobOutputContainer(primaryDisplayJob) || DOCKER_OUTPUT_DIR} basePath={HOST_OUTPUT_LABEL} />
 
       <EngineTelemetry stats={telemetry} state={telemetryState} />
 
@@ -453,7 +469,7 @@ function VideoConsole({
             settings={settings}
             browserStatus={browserStatus}
             submitting={submitting}
-            hasActiveJob={!!activeJob && ["queued", "running"].includes(activeJob.status)}
+            hasActiveJob={displayJobs.some((job) => ["queued", "running"].includes(job.status))}
             onStart={submit}
             onStop={stopGeneration}
             onKillAllSlots={killAllSlots}
@@ -461,8 +477,8 @@ function VideoConsole({
             onSetDirectDolaSubmitEnabled={setDirectDolaSubmitEnabled}
           />
           <GenerationQueue
-            items={queueItems}
-            snapshots={activeJob?.dola_cookie_snapshots_json ?? []}
+            items={queueRows}
+            snapshots={displaySnapshots}
             onResumePoll={resumePoll}
             onForceStop={forceStopItem}
             onRestart={restartItem}
@@ -965,16 +981,16 @@ function GenerationQueue({
   onRestart,
   browserUrl,
 }: {
-  items: JobItem[]
+  items: QueueRow[]
   snapshots: Array<Record<string, unknown>>
-  onResumePoll: (itemId: string) => void
-  onForceStop: (itemId: string) => void
-  onRestart: (itemId: string) => void
+  onResumePoll: (jobId: string, itemId: string) => void
+  onForceStop: (jobId: string, itemId: string) => void
+  onRestart: (jobId: string, itemId: string) => void
   browserUrl: string
 }) {
   const [page, setPage] = useState(1)
   const [expandedItemId, setExpandedItemId] = useState<string | null>(null)
-  const stableItems = useMemo(() => stableJobItems(items), [items])
+  const stableItems = useMemo(() => [...items].sort(compareQueueRows), [items])
   const pageCount = Math.max(1, Math.ceil(stableItems.length / QUEUE_PAGE_SIZE))
   const safePage = Math.min(page, pageCount)
   const start = (safePage - 1) * QUEUE_PAGE_SIZE
@@ -1036,17 +1052,17 @@ function GenerationQueue({
                           </Button>
                         )}
                         {canResume && (
-                          <Button variant="secondary" className="h-7 shrink-0 px-2 text-[11px]" onClick={() => onResumePoll(item.id)}>
+                          <Button variant="secondary" className="h-7 shrink-0 px-2 text-[11px]" onClick={() => onResumePoll(item.jobId, item.id)}>
                             Resume Poll
                           </Button>
                         )}
                         {canRestart && (
-                          <Button variant="secondary" className="h-7 shrink-0 px-2 text-[11px]" onClick={() => onRestart(item.id)}>
+                          <Button variant="secondary" className="h-7 shrink-0 px-2 text-[11px]" onClick={() => onRestart(item.jobId, item.id)}>
                             Restart
                           </Button>
                         )}
                         {canForceStop && (
-                          <Button variant="secondary" className="h-7 shrink-0 px-2 text-[11px] text-red-200 hover:text-red-100" onClick={() => onForceStop(item.id)}>
+                          <Button variant="secondary" className="h-7 shrink-0 px-2 text-[11px] text-red-200 hover:text-red-100" onClick={() => onForceStop(item.jobId, item.id)}>
                             Force Stop
                           </Button>
                         )}
@@ -1856,10 +1872,27 @@ function collectVideoArtifacts(jobs: Job[]): VideoArtifact[] {
 
 function stableJobItems(items: JobItem[]): JobItem[] {
   return [...items].sort((left, right) => {
-    const created = new Date(left.created_at).getTime() - new Date(right.created_at).getTime()
+    const created = safeTimestamp(left.created_at) - safeTimestamp(right.created_at)
     if (created !== 0) return created
     return left.id.localeCompare(right.id)
   })
+}
+
+function safeTimestamp(value: string | undefined): number {
+  const timestamp = value ? new Date(value).getTime() : 0
+  return Number.isFinite(timestamp) ? timestamp : 0
+}
+
+function compareJobsOldestFirst(left: Job, right: Job): number {
+  const created = safeTimestamp(left.created_at) - safeTimestamp(right.created_at)
+  return created || left.id.localeCompare(right.id)
+}
+
+function compareQueueRows(left: QueueRow, right: QueueRow): number {
+  const jobCreated = safeTimestamp(left.jobCreatedAt) - safeTimestamp(right.jobCreatedAt)
+  if (jobCreated !== 0) return jobCreated
+  const itemCreated = safeTimestamp(left.created_at) - safeTimestamp(right.created_at)
+  return itemCreated || left.id.localeCompare(right.id)
 }
 
 function activeJobOutputLabel(job?: Job | null): string {
