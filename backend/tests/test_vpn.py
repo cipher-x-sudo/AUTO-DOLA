@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import httpx
 import pytest
 
 from app.services import vpn
@@ -30,3 +31,53 @@ def test_list_and_choose_vpn_configs(monkeypatch: pytest.MonkeyPatch, tmp_path: 
 
     assert configs == [{"name": "a.ovpn", "size_bytes": 6}]
     assert vpn.choose_vpn_config("a.ovpn")["name"] == "a.ovpn"
+
+
+@pytest.mark.asyncio
+async def test_browser_manager_vpn_request_returns_success_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    original_client = httpx.AsyncClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert str(request.url) == "http://manager/vpn/test-ip"
+        return httpx.Response(200, json={"ok": True, "connected": True})
+
+    def mock_client(*args: object, **kwargs: object) -> httpx.AsyncClient:
+        return original_client(transport=httpx.MockTransport(handler), timeout=kwargs.get("timeout"))
+
+    monkeypatch.setattr(httpx, "AsyncClient", mock_client)
+
+    result = await vpn.browser_manager_vpn_request("http://manager", "/vpn/test-ip")
+
+    assert result == {"ok": True, "connected": True}
+
+
+@pytest.mark.asyncio
+async def test_browser_manager_vpn_request_raises_manager_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    original_client = httpx.AsyncClient
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json={"ok": False, "error": "VPN_AUTH_FAILED"})
+
+    def mock_client(*args: object, **kwargs: object) -> httpx.AsyncClient:
+        return original_client(transport=httpx.MockTransport(handler), timeout=kwargs.get("timeout"))
+
+    monkeypatch.setattr(httpx, "AsyncClient", mock_client)
+
+    with pytest.raises(ValueError, match="VPN_AUTH_FAILED"):
+        await vpn.browser_manager_vpn_request("http://manager", "/vpn/test-ip")
+
+
+@pytest.mark.asyncio
+async def test_browser_manager_vpn_request_raises_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    original_client = httpx.AsyncClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("failed", request=request)
+
+    def mock_client(*args: object, **kwargs: object) -> httpx.AsyncClient:
+        return original_client(transport=httpx.MockTransport(handler), timeout=kwargs.get("timeout"))
+
+    monkeypatch.setattr(httpx, "AsyncClient", mock_client)
+
+    with pytest.raises(ValueError, match="VPN_MANAGER_UNAVAILABLE"):
+        await vpn.browser_manager_vpn_request("http://manager", "/vpn/test-ip")

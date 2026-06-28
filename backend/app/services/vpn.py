@@ -80,7 +80,20 @@ def choose_vpn_username(usernames: str) -> str:
 
 
 async def browser_manager_vpn_request(manager_url: str, endpoint: str, payload: dict[str, Any] | None = None, timeout: float = 90) -> dict[str, Any]:
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        response = await client.post(f"{manager_url.rstrip('/')}{endpoint}", json=payload or {})
-        response.raise_for_status()
-        return response.json()
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(f"{manager_url.rstrip('/')}{endpoint}", json=payload or {})
+    except httpx.RequestError as exc:
+        raise ValueError("VPN_MANAGER_UNAVAILABLE") from exc
+
+    try:
+        data = response.json()
+    except ValueError:
+        data = {}
+
+    if response.is_error:
+        error = data.get("error") if isinstance(data, dict) else ""
+        raise ValueError(str(error or "VPN_MANAGER_ERROR"))
+    if not isinstance(data, dict):
+        raise ValueError("VPN_MANAGER_ERROR")
+    return data
