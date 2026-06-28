@@ -59,6 +59,7 @@ const emptySettings: SettingsPayload = {
   vpn_password: "",
   vpn_password_saved: false,
   vpn_browser_slots: 5,
+  browser_headless: false,
   tts_default_voice: "en-US-AriaNeural",
   dola_mode: "hybrid",
 }
@@ -195,6 +196,7 @@ export default function App() {
           promptText={studioPromptText}
           setPromptText={setStudioPromptText}
           onRefresh={refresh}
+          onSettingsSaved={setSettings}
         />
       )}
       {page === "prompts" && (
@@ -227,6 +229,7 @@ function VideoConsole({
   promptText,
   setPromptText,
   onRefresh,
+  onSettingsSaved,
 }: {
   settings: SettingsPayload
   jobs: Job[]
@@ -236,6 +239,7 @@ function VideoConsole({
   promptText: string
   setPromptText: (value: string) => void
   onRefresh: () => void
+  onSettingsSaved: (settings: SettingsPayload) => void
 }) {
   const [ratio, setRatio] = useState(settings.default_ratio || "9:16")
   const [duration, setDuration] = useState(settings.default_duration || 10)
@@ -295,10 +299,32 @@ function VideoConsole({
     if (!activeJob || !["queued", "running"].includes(activeJob.status)) return
     try {
       await api.cancelVideoJob(activeJob.id)
-      toast.success("Stop requested")
+      await api.killAllDolaBrowserSlots()
+      toast.success("Force stopped generation and killed browser/VPN slots")
       onRefresh()
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Failed to stop job")
+    }
+  }
+
+  async function killAllSlots() {
+    try {
+      const result = await api.killAllDolaBrowserSlots()
+      toast.success(`Killed ${result.closed_browser_slots} browser slot(s), ${result.closed_vpn_slots} VPN slot(s)`)
+      onRefresh()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to kill browser/VPN slots")
+    }
+  }
+
+  async function setBrowserHeadless(value: boolean) {
+    try {
+      const saved = await api.saveSettings({ ...settings, browser_headless: value })
+      onSettingsSaved(saved)
+      toast.success(value ? "Headless mode enabled" : "Visible browser mode enabled")
+      onRefresh()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to save browser mode")
     }
   }
 
@@ -376,6 +402,8 @@ function VideoConsole({
             hasActiveJob={!!activeJob && ["queued", "running"].includes(activeJob.status)}
             onStart={submit}
             onStop={stopGeneration}
+            onKillAllSlots={killAllSlots}
+            onSetBrowserHeadless={setBrowserHeadless}
           />
           <GenerationQueue
             items={queueItems}
@@ -689,6 +717,8 @@ function GenerationSettings({
   hasActiveJob,
   onStart,
   onStop,
+  onKillAllSlots,
+  onSetBrowserHeadless,
 }: {
   ratio: string
   setRatio: (value: string) => void
@@ -706,6 +736,8 @@ function GenerationSettings({
   hasActiveJob: boolean
   onStart: () => void
   onStop: () => void
+  onKillAllSlots: () => void
+  onSetBrowserHeadless: (value: boolean) => void
 }) {
   return (
     <Card className="p-4">
@@ -760,16 +792,29 @@ function GenerationSettings({
                 Browser VPN: {browserStatus?.browser_vpn_active ? `active ${browserStatus.browser_vpn_config || ""} ${browserStatus.browser_vpn_ip || ""}` : "inactive"}
                 {typeof browserStatus?.active_vpn_browser_count === "number" ? ` - isolated slots ${browserStatus.active_vpn_browser_count}` : ""}
               </div>
+              <div className="mt-1 truncate text-[11px] font-semibold text-muted-foreground">
+                Browser mode: {settings.browser_headless ? "Headless" : "Visible"}
+              </div>
               {(browserStatus?.last_submit_endpoint || browserStatus?.last_dola_error) && (
                 <div className="mt-1 truncate text-[11px] font-semibold text-muted-foreground">
                   Last submit: {browserStatus.last_submit_endpoint || "none"} {browserStatus.last_dola_error ? `- ${browserStatus.last_dola_error}` : ""}
                 </div>
               )}
             </div>
-            <Button variant="secondary" className="h-9 shrink-0 px-3 text-xs" onClick={() => window.open(browserStatus?.manual_url || "http://localhost:6080", "_blank")}>
-              <Terminal size={14} />
-              Open
-            </Button>
+            <div className="flex shrink-0 flex-wrap gap-2">
+              <Button variant="secondary" className="h-9 px-3 text-xs" onClick={() => onSetBrowserHeadless(!settings.browser_headless)}>
+                <Settings2 size={14} />
+                {settings.browser_headless ? "Headless" : "Visible"}
+              </Button>
+              <Button variant="secondary" className="h-9 px-3 text-xs text-red-200 hover:text-red-100" onClick={onKillAllSlots}>
+                <Square size={14} />
+                Kill All Slots
+              </Button>
+              <Button variant="secondary" className="h-9 px-3 text-xs" onClick={() => window.open(browserStatus?.manual_url || "http://localhost:6080", "_blank")}>
+                <Terminal size={14} />
+                Open
+              </Button>
+            </div>
           </div>
         </div>
       </div>

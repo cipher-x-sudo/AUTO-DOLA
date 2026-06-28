@@ -156,12 +156,14 @@ class DolaBrowserClient:
         screenshot_dir: Path | None = None,
         proxy_url: str = "",
         manager_url: str = "",
+        headless: bool = False,
     ) -> None:
         self.cdp_url = cdp_url or settings.dola_browser_cdp_url
         self.manager_url = manager_url or settings.dola_browser_manager_url or self.cdp_url
         self.manual_url = manual_url or settings.dola_browser_manual_url
         self.screenshot_dir = screenshot_dir or (settings.log_dir / "dola-browser")
         self.proxy_url = proxy_url.strip()
+        self.headless = headless
         self._active_slots: dict[str, dict[str, Any]] = {}
         self._connect_lock = asyncio.Lock()
 
@@ -175,7 +177,7 @@ class DolaBrowserClient:
         async with httpx.AsyncClient(timeout=30) as client:
             response = await client.post(
                 f"{resolve_cdp_url(self.manager_url).rstrip('/')}/launch",
-                json={"proxy_url": self.proxy_url, "profile_dir": profile_dir},
+                json={"proxy_url": self.proxy_url, "profile_dir": profile_dir, "headless": self.headless},
             )
             try:
                 payload = response.json()
@@ -330,6 +332,7 @@ class DolaBrowserClient:
                     "config_name": config_name,
                     "username": username,
                     "password": password,
+                    "headless": self.headless,
                 },
             )
             response.raise_for_status()
@@ -354,6 +357,13 @@ class DolaBrowserClient:
                 return bool(payload.get("closed"))
         except Exception:
             return False
+
+    async def kill_all_slots(self) -> dict[str, Any]:
+        async with httpx.AsyncClient(timeout=45) as client:
+            response = await client.post(f"{resolve_cdp_url(self.manager_url).rstrip('/')}/kill-all", json={})
+            response.raise_for_status()
+            payload = response.json()
+        return payload if isinstance(payload, dict) else {"ok": False}
 
     async def _slot_context(self, slot_id: str) -> BrowserContext:
         runtime = self._active_slots.get(slot_id)
@@ -396,6 +406,7 @@ class DolaBrowserClient:
                 "browser_vpn_config": str(vpn_status.get("config_name") or ""),
                 "browser_vpn_ip": str(vpn_status.get("ip") or ""),
                 "browser_ip": browser_ip,
+                "browser_headless": bool(manager_status.get("browser_headless", self.headless)),
                 "page_count": manager_status.get("active_browser_count", 0),
                 "active_browser_count": manager_status.get("active_browser_count", 0),
                 "active_vpn_browser_count": manager_status.get("active_vpn_browser_count", 0),

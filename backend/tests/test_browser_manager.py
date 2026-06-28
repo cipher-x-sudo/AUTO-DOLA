@@ -134,6 +134,16 @@ def test_browser_launch_args_use_one_blank_tab_and_no_extension(tmp_path: Path) 
     assert not any("dola.com" in argument for argument in args)
 
 
+def test_apply_headless_args_adds_chrome_headless_flag(tmp_path: Path) -> None:
+    manager = load_browser_manager()
+    args = manager.browser_launch_args(tmp_path / "profile", 9300, 0, 0)
+
+    headless_args = manager.apply_headless_args(args, True)
+
+    assert "--headless=new" in headless_args
+    assert headless_args[-1] == "about:blank"
+
+
 def test_proxy_credentials_skip_non_auth_or_empty_proxy() -> None:
     manager = load_browser_manager()
 
@@ -225,9 +235,32 @@ def test_isolated_vpn_slot_uses_unique_child_profile_root(monkeypatch, tmp_path:
 
     monkeypatch.setattr(manager.subprocess, "check_call", fake_check_call)
 
-    slot = manager.launch_isolated_vpn_slot(str(config), config.name, "user", "pass")
+    slot = manager.launch_isolated_vpn_slot(str(config), config.name, "user", "pass", headless=True)
     command = commands[0]
     profile_env = next(value for value in command if value.startswith("CHROME_PROFILE_DIR="))
 
     assert slot["profile_root"].startswith("/data/browser-profile/vpn-slots/vpn-slot-")
     assert profile_env == f"CHROME_PROFILE_DIR={slot['profile_root']}"
+    assert "BROWSER_HEADLESS=1" in command
+
+
+def test_kill_all_closes_browser_slots_vpn_slots_and_vpn(monkeypatch) -> None:
+    manager = load_browser_manager()
+    manager.SLOTS.clear()
+    manager.VPN_SLOT_CONTAINERS.clear()
+    manager.SLOTS["slot-1"] = {"slot_id": "slot-1"}
+    manager.VPN_SLOT_CONTAINERS["vpn-slot-1"] = {"slot_id": "vpn-slot-1"}
+    closed_browser: list[str] = []
+    closed_vpn: list[str] = []
+
+    monkeypatch.setattr(manager, "close_slot", lambda slot_id, delete_profile=True: closed_browser.append(slot_id) or True)
+    monkeypatch.setattr(manager, "close_isolated_vpn_slot", lambda slot_id="", container_name="": closed_vpn.append(slot_id) or True)
+    monkeypatch.setattr(manager, "disconnect_vpn", lambda: True)
+
+    result = manager.kill_all()
+
+    assert result["closed_browser_slots"] == 1
+    assert result["closed_vpn_slots"] == 1
+    assert result["vpn_disconnected"] is True
+    assert closed_browser == ["slot-1"]
+    assert closed_vpn == ["vpn-slot-1"]

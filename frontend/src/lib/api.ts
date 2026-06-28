@@ -36,6 +36,7 @@ export const api = {
   ffmpeg: () => request<{ available: boolean; path: string }>("/api/system/ffmpeg"),
   chrome: () => request<{ available: boolean; path: string }>("/api/system/chrome"),
   dolaBrowser: () => request<DolaBrowserStatus>("/api/system/dola-browser"),
+  killAllDolaBrowserSlots: () => request<{ ok: boolean; closed_browser_slots: number; closed_vpn_slots: number; vpn_disconnected: boolean }>("/api/system/dola-browser/kill-all", { method: "POST" }),
   videoJobs: () => request<Job[]>("/api/video/jobs"),
   createVideoJob: (payload: unknown) => request<Job>("/api/video/jobs", { method: "POST", body: JSON.stringify(payload) }),
   cancelVideoJob: (id: string) => request<Job>(`/api/video/jobs/${id}/cancel`, { method: "POST" }),

@@ -138,6 +138,7 @@ async def process_video(session: Session, job: Job, only_item_id: UUID | None = 
     output_dir = Path(config.get("job_output_folder") or config.get("save_folder") or app_settings.get("output_dir") or settings.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     vpn_enabled = bool(app_settings.get("vpn_enabled"))
+    browser_headless = bool(app_settings.get("browser_headless"))
     proxy_url = app_settings.get("proxy_url", "") if app_settings.get("proxy_enabled") and not vpn_enabled else ""
     dola_mode = str(app_settings.get("dola_mode") or settings.dola_mode or "hybrid").lower()
     if dola_mode not in {"direct", "browser", "hybrid"}:
@@ -146,7 +147,7 @@ async def process_video(session: Session, job: Job, only_item_id: UUID | None = 
     effective_dola_mode = "browser" if dola_mode == "hybrid" and requested_duration == 15 else dola_mode
     submit_client = DolaClient(app_settings.get("dola_auth_cookies", settings.dola_auth_cookies), settings.dola_default_region, proxy=proxy_url)
     poll_client = DolaClient(app_settings.get("dola_auth_cookies", settings.dola_auth_cookies), settings.dola_default_region)
-    browser_client = DolaBrowserClient(proxy_url=proxy_url)
+    browser_client = DolaBrowserClient(proxy_url=proxy_url, headless=browser_headless)
     items = session.exec(select(JobItem).where(JobItem.job_id == job.id).order_by(JobItem.created_at.asc(), JobItem.id.asc())).all()
     item_numbers = {item.id: index + 1 for index, item in enumerate(items)}
     run_items = [item for item in items if only_item_id is None or item.id == only_item_id]
@@ -155,7 +156,7 @@ async def process_video(session: Session, job: Job, only_item_id: UUID | None = 
     vpn_browser_slots = effective_video_parallel(app_settings.get("vpn_browser_slots", 5))
     log(session, f"Video concurrency requested: {requested_parallel}", "info", job.id)
     log(session, f"Video concurrency effective: {parallel}", "info", job.id)
-    log(session, f"Video settings: duration={requested_duration}, ratio={config.get('ratio', '9:16')}, mode={effective_dola_mode}, submit_proxy_enabled={bool(proxy_url)}, vpn_enabled={vpn_enabled}, vpn_browser_slots={vpn_browser_slots}, polling_proxy_enabled=False", "info", job.id)
+    log(session, f"Video settings: duration={requested_duration}, ratio={config.get('ratio', '9:16')}, mode={effective_dola_mode}, submit_proxy_enabled={bool(proxy_url)}, vpn_enabled={vpn_enabled}, vpn_browser_slots={vpn_browser_slots}, browser_headless={browser_headless}, polling_proxy_enabled=False", "info", job.id)
     max_retries = max(int(config.get("max_retries", 3)), HIGH_DEMAND_MIN_RETRIES)
     semaphore = asyncio.Semaphore(parallel)
     browser_submit_semaphore = asyncio.Semaphore(min(vpn_browser_slots, parallel) if vpn_enabled else min(BROWSER_SUBMIT_PARALLEL, parallel))
@@ -328,7 +329,7 @@ async def process_video(session: Session, job: Job, only_item_id: UUID | None = 
                             )
                             vpn_slot_id = str(vpn_status.get("slot_id") or "")
                             vpn_slot_container = str(vpn_status.get("container_name") or "")
-                            active_browser_client = DolaBrowserClient(manager_url=str(vpn_status.get("manager_url") or ""), manual_url=browser_client.manual_url)
+                            active_browser_client = DolaBrowserClient(manager_url=str(vpn_status.get("manager_url") or ""), manual_url=browser_client.manual_url, headless=browser_headless)
                             item_log(f"VPN connected slot {vpn_slot_id}: config={vpn_status.get('config_name')}, user={vpn_status.get('username_masked')}, ip={vpn_status.get('ip')}", "success")
                         try:
                             ensure_current_run()

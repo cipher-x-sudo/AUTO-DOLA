@@ -58,3 +58,10 @@ def test_save_settings_clamps_vpn_browser_slots() -> None:
 
         assert high["vpn_browser_slots"] == 50
         assert bad["vpn_browser_slots"] == 5
+
+
+def test_save_settings_persists_browser_headless() -> None:
+    with make_session() as session:
+        saved = save_app_settings(session, {"browser_headless": True})
+
+        assert saved["browser_headless"] is True

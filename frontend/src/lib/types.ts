@@ -56,6 +56,7 @@ export interface SettingsPayload {
   vpn_password: string
   vpn_password_saved: boolean
   vpn_browser_slots: number
+  browser_headless: boolean
   tts_default_voice: string
   dola_mode: "direct" | "browser" | "hybrid"
 }
@@ -77,6 +78,7 @@ export interface DolaBrowserStatus {
   page_count?: number
   active_browser_count?: number
   active_vpn_browser_count?: number
+  browser_headless?: boolean
   max_browser_slots?: number
   active_cdp_ports?: number[]
   last_submit_endpoint?: string

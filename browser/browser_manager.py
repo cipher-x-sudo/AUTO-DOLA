@@ -115,7 +115,7 @@ def manager_post(url: str, endpoint: str, payload: dict, timeout: float = 120.0)
     return data
 
 
-def launch_isolated_vpn_slot(config_path: str, config_name: str, username: str, password: str) -> dict:
+def launch_isolated_vpn_slot(config_path: str, config_name: str, username: str, password: str, headless: bool = False) -> dict:
     if not docker_available():
         raise RuntimeError("VPN_SLOT_DOCKER_UNAVAILABLE")
     config = validate_vpn_config_path(config_path)
@@ -144,6 +144,8 @@ def launch_isolated_vpn_slot(config_path: str, config_name: str, username: str, 
             "VPN_CONFIG_DIR=/data/profiles/vpn",
             "-e",
             f"CHROME_PROFILE_DIR={child_profile_root}",
+            "-e",
+            f"BROWSER_HEADLESS={'1' if headless else '0'}",
             "-v",
             f"{profile_volume}:/data/browser-profile",
             "-v",
@@ -176,6 +178,7 @@ def launch_isolated_vpn_slot(config_path: str, config_name: str, username: str, 
         "container_name": container_name,
         "manager_url": manager_url,
         "profile_root": child_profile_root,
+        "headless": headless,
         "config_name": config_name or config.name,
         "username_masked": mask_username(username),
         "ip": vpn_result.get("ip", ""),
@@ -200,6 +203,26 @@ def close_isolated_vpn_slot(slot_id: str = "", container_name: str = "") -> bool
         subprocess.call(["docker", "rm", "-f", name])
         return True
     return False
+
+
+def kill_all() -> dict:
+    browser_slot_ids = list(SLOTS)
+    vpn_slot_ids = list(VPN_SLOT_CONTAINERS)
+    closed_browser_slots = 0
+    closed_vpn_slots = 0
+    for slot_id in browser_slot_ids:
+        if close_slot(slot_id, delete_profile=True):
+            closed_browser_slots += 1
+    for slot_id in vpn_slot_ids:
+        if close_isolated_vpn_slot(slot_id):
+            closed_vpn_slots += 1
+    vpn_disconnected = disconnect_vpn()
+    return {
+        "ok": True,
+        "closed_browser_slots": closed_browser_slots,
+        "closed_vpn_slots": closed_vpn_slots,
+        "vpn_disconnected": vpn_disconnected,
+    }
 
 
 def json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict) -> None:
@@ -264,6 +287,19 @@ def browser_launch_args(profile_dir: Path, port: int, x: int, y: int, proxy_url:
         args.append(f"--proxy-server={proxy_arg}")
     args.append("about:blank")
     return args
+
+
+def browser_headless_enabled(value: object = None) -> bool:
+    raw = os.environ.get("BROWSER_HEADLESS", "") if value is None else str(value)
+    return raw.lower() in {"1", "true", "yes", "on"}
+
+
+def apply_headless_args(args: list[str], headless: bool) -> list[str]:
+    if not headless:
+        return args
+    next_args = list(args)
+    next_args.insert(1, "--headless=new")
+    return next_args
 
 
 def tail_text(path: Path, max_chars: int = 4000) -> str:
@@ -423,7 +459,7 @@ def validate_profile_dir(profile_dir: str) -> Path:
     return path
 
 
-def launch_slot(proxy_url: str = "", profile_dir: str = "") -> dict:
+def launch_slot(proxy_url: str = "", profile_dir: str = "", headless: bool | None = None) -> dict:
     with LOCK:
         slot_number = len(SLOTS) + 1
         port, external_port = free_port()
@@ -433,7 +469,8 @@ def launch_slot(proxy_url: str = "", profile_dir: str = "") -> dict:
         credentials = proxy_credentials(proxy_url)
         x = ((slot_number - 1) % 5) * 40
         y = ((slot_number - 1) % 5) * 35
-        args = browser_launch_args(profile_path, port, x, y, proxy_url)
+        headless_enabled = browser_headless_enabled() if headless is None else headless
+        args = apply_headless_args(browser_launch_args(profile_path, port, x, y, proxy_url), headless_enabled)
         log_path = LOG_DIR / f"chromium-{slot_id}.log"
         log_file = log_path.open("ab")
         process = subprocess.Popen(args, stdout=log_file, stderr=log_file, env={**os.environ, "DISPLAY": DISPLAY})
@@ -489,6 +526,7 @@ def launch_slot(proxy_url: str = "", profile_dir: str = "") -> dict:
             "proxy_username": credentials.get("username", ""),
             "proxy_password": credentials.get("password", ""),
             "launch_url": "about:blank",
+            "headless": headless_enabled,
             "started_at": time.time(),
             "process": process,
             "forward_process": forward_process,
@@ -573,6 +611,7 @@ def status() -> dict:
         "slots": slots,
         "active_vpn_browser_count": len(vpn_slots),
         "vpn_slots": vpn_slots,
+        "browser_headless": browser_headless_enabled(),
     }
 
 
@@ -594,6 +633,7 @@ class Handler(BaseHTTPRequestHandler):
                     slot = launch_slot(
                         str(payload.get("proxy_url") or ""),
                         str(payload.get("profile_dir") or ""),
+                        bool(payload.get("headless", browser_headless_enabled())),
                     )
                 except RuntimeError as exc:
                     try:
@@ -623,6 +663,7 @@ class Handler(BaseHTTPRequestHandler):
                     str(payload.get("config_name") or ""),
                     str(payload.get("username") or ""),
                     str(payload.get("password") or ""),
+                    bool(payload.get("headless", browser_headless_enabled())),
                 )
                 json_response(self, 200, result)
                 return
@@ -666,6 +707,9 @@ class Handler(BaseHTTPRequestHandler):
                     },
                 )
                 return
+            if self.path == "/kill-all":
+                json_response(self, 200, kill_all())
+                return
             json_response(self, 404, {"ok": False, "error": "Not found"})
         except Exception as exc:
             json_response(self, 500, {"ok": False, "error": str(exc)})
@@ -675,11 +719,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def shutdown(*_args: object) -> None:
-    disconnect_vpn()
-    for slot_id in list(VPN_SLOT_CONTAINERS):
-        close_isolated_vpn_slot(slot_id)
-    for slot_id in list(SLOTS):
-        close_slot(slot_id)
+    kill_all()
     raise SystemExit(0)
 
 

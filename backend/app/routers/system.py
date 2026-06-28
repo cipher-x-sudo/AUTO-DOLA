@@ -38,6 +38,16 @@ async def get_dola_browser(session: Session = Depends(get_session)) -> dict:
         status["mode"] = app_settings.get("dola_mode", settings.dola_mode)
         status["browser_proxy_active"] = bool(proxy_url)
         status["browser_vpn_enabled"] = vpn_enabled
+        status["browser_headless"] = bool(app_settings.get("browser_headless"))
         return status
+    finally:
+        await client.close()
+
+
+@router.post("/dola-browser/kill-all")
+async def kill_all_dola_browser_slots() -> dict:
+    client = DolaBrowserClient()
+    try:
+        return await client.kill_all_slots()
     finally:
         await client.close()
