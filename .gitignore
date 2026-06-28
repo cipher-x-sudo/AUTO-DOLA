@@ -14,7 +14,6 @@ htmlcov/
 outputs/
 profiles/
 logs/
-niches/
 generated-prompts/
 secrets/
 auth_cookies.txt
