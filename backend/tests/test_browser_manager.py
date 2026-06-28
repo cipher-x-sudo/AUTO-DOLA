@@ -203,3 +203,31 @@ def test_validate_vpn_config_path_accepts_ovpn_under_vpn_dir(tmp_path: Path) -> 
     config.write_text("client", encoding="utf-8")
 
     assert manager.validate_vpn_config_path(str(config)) == config.resolve()
+
+
+def test_isolated_vpn_slot_uses_unique_child_profile_root(monkeypatch, tmp_path: Path) -> None:
+    manager = load_browser_manager()
+    manager.VPN_SLOT_CONTAINERS.clear()
+    manager.VPN_DIR = tmp_path / "vpn"
+    manager.VPN_DIR.mkdir()
+    config = manager.VPN_DIR / "hk.ovpn"
+    config.write_text("client", encoding="utf-8")
+    commands: list[list[str]] = []
+
+    monkeypatch.setattr(manager, "docker_available", lambda: True)
+    monkeypatch.setattr(manager, "current_network_name", lambda: "auto-dola_default")
+    monkeypatch.setattr(manager, "mounted_volume_name", lambda destination, _fallback: f"volume-{destination.rsplit('/', 1)[-1]}")
+    monkeypatch.setattr(manager, "wait_for_manager", lambda _url: None)
+    monkeypatch.setattr(manager, "manager_post", lambda *_args, **_kwargs: {"ok": True, "ip": "1.2.3.4"})
+
+    def fake_check_call(command: list[str]) -> None:
+        commands.append(command)
+
+    monkeypatch.setattr(manager.subprocess, "check_call", fake_check_call)
+
+    slot = manager.launch_isolated_vpn_slot(str(config), config.name, "user", "pass")
+    command = commands[0]
+    profile_env = next(value for value in command if value.startswith("CHROME_PROFILE_DIR="))
+
+    assert slot["profile_root"].startswith("/data/browser-profile/vpn-slots/vpn-slot-")
+    assert profile_env == f"CHROME_PROFILE_DIR={slot['profile_root']}"

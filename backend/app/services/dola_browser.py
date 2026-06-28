@@ -177,8 +177,25 @@ class DolaBrowserClient:
                 f"{resolve_cdp_url(self.manager_url).rstrip('/')}/launch",
                 json={"proxy_url": self.proxy_url, "profile_dir": profile_dir},
             )
-            response.raise_for_status()
-            payload = response.json()
+            try:
+                payload = response.json()
+            except ValueError:
+                payload = {"ok": False, "error": response.text}
+            if response.is_error:
+                error_type = str(payload.get("error") or "BROWSER_MANAGER_LAUNCH_FAILED")
+                raise DolaBrowserError(
+                    f"Dola browser launch failed: {error_type}",
+                    {
+                        "cdp": False,
+                        "error_msg": payload.get("detail") or payload.get("error") or response.text,
+                        "manager_status": response.status_code,
+                        "slot_id": payload.get("slot_id"),
+                        "profile_dir": payload.get("profile_dir"),
+                        "log_file": payload.get("log_file"),
+                        "body": payload.get("log_snippet") or "",
+                    },
+                    error_type,
+                )
         if not payload.get("ok"):
             raise DolaBrowserError(f"Dola browser manager launch failed: {payload.get('error')}", {"cdp": False, "error_msg": payload.get("error")})
         return payload["slot"]

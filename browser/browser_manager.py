@@ -121,6 +121,7 @@ def launch_isolated_vpn_slot(config_path: str, config_name: str, username: str, 
     config = validate_vpn_config_path(config_path)
     slot_id = f"vpn-slot-{int(time.time() * 1000)}"
     container_name = f"auto-dola-{slot_id}"
+    child_profile_root = f"/data/browser-profile/vpn-slots/{slot_id}"
     network = current_network_name()
     profile_volume = mounted_volume_name("/data/browser-profile", SLOT_PROFILE_VOLUME)
     profiles_volume = mounted_volume_name("/data/profiles", SLOT_PROFILES_VOLUME)
@@ -142,7 +143,7 @@ def launch_isolated_vpn_slot(config_path: str, config_name: str, username: str, 
             "-e",
             "VPN_CONFIG_DIR=/data/profiles/vpn",
             "-e",
-            "CHROME_PROFILE_DIR=/data/browser-profile",
+            f"CHROME_PROFILE_DIR={child_profile_root}",
             "-v",
             f"{profile_volume}:/data/browser-profile",
             "-v",
@@ -174,6 +175,7 @@ def launch_isolated_vpn_slot(config_path: str, config_name: str, username: str, 
         "slot_id": slot_id,
         "container_name": container_name,
         "manager_url": manager_url,
+        "profile_root": child_profile_root,
         "config_name": config_name or config.name,
         "username_masked": mask_username(username),
         "ip": vpn_result.get("ip", ""),
@@ -262,6 +264,13 @@ def browser_launch_args(profile_dir: Path, port: int, x: int, y: int, proxy_url:
         args.append(f"--proxy-server={proxy_arg}")
     args.append("about:blank")
     return args
+
+
+def tail_text(path: Path, max_chars: int = 4000) -> str:
+    try:
+        return path.read_text(errors="ignore")[-max_chars:]
+    except Exception:
+        return ""
 
 
 def wait_for_port(port: int, timeout: float = 20.0, host: str = "127.0.0.1") -> None:
@@ -425,7 +434,8 @@ def launch_slot(proxy_url: str = "", profile_dir: str = "") -> dict:
         x = ((slot_number - 1) % 5) * 40
         y = ((slot_number - 1) % 5) * 35
         args = browser_launch_args(profile_path, port, x, y, proxy_url)
-        log_file = (LOG_DIR / f"chromium-{slot_id}.log").open("ab")
+        log_path = LOG_DIR / f"chromium-{slot_id}.log"
+        log_file = log_path.open("ab")
         process = subprocess.Popen(args, stdout=log_file, stderr=log_file, env={**os.environ, "DISPLAY": DISPLAY})
         try:
             wait_for_port(port)
@@ -440,9 +450,28 @@ def launch_slot(proxy_url: str = "", profile_dir: str = "") -> dict:
                 stderr=forward_log,
             )
             wait_for_port(external_port, host="127.0.0.1")
-        except Exception:
+        except Exception as exc:
             process.terminate()
-            raise
+            try:
+                process.wait(timeout=3)
+            except Exception:
+                process.kill()
+            try:
+                log_file.close()
+            except Exception:
+                pass
+            raise RuntimeError(
+                json.dumps(
+                    {
+                        "error": "CHROMIUM_LAUNCH_FAILED",
+                        "detail": str(exc),
+                        "slot_id": slot_id,
+                        "profile_dir": str(profile_path),
+                        "log_file": str(log_path),
+                        "log_snippet": tail_text(log_path),
+                    }
+                )
+            ) from exc
         container_ip = socket.gethostbyname(socket.gethostname())
         slot = {
             "slot_id": slot_id,
@@ -464,6 +493,7 @@ def launch_slot(proxy_url: str = "", profile_dir: str = "") -> dict:
             "process": process,
             "forward_process": forward_process,
             "log_file": log_file,
+            "log_path": str(log_path),
             "forward_log": forward_log,
         }
         SLOTS[slot_id] = slot
@@ -560,16 +590,22 @@ class Handler(BaseHTTPRequestHandler):
         try:
             payload = read_json(self)
             if self.path == "/launch":
+                try:
+                    slot = launch_slot(
+                        str(payload.get("proxy_url") or ""),
+                        str(payload.get("profile_dir") or ""),
+                    )
+                except RuntimeError as exc:
+                    try:
+                        error_payload = json.loads(str(exc))
+                    except Exception:
+                        error_payload = {"error": "BROWSER_LAUNCH_FAILED", "detail": str(exc)}
+                    json_response(self, 500, {"ok": False, **error_payload})
+                    return
                 json_response(
                     self,
                     200,
-                    {
-                        "ok": True,
-                        "slot": launch_slot(
-                            str(payload.get("proxy_url") or ""),
-                            str(payload.get("profile_dir") or ""),
-                        ),
-                    },
+                    {"ok": True, "slot": slot},
                 )
                 return
             if self.path == "/close":
