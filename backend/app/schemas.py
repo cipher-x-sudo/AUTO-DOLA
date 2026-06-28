@@ -87,6 +87,7 @@ class SettingsPayload(BaseModel):
     vpn_password: str = ""
     vpn_password_saved: bool = False
     browser_headless: bool = False
+    direct_dola_submit_enabled: bool = True
     tts_default_voice: str = "en-US-AriaNeural"
     dola_mode: Literal["direct", "browser", "hybrid"] = "hybrid"
 

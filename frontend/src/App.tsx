@@ -59,6 +59,7 @@ const emptySettings: SettingsPayload = {
   vpn_password: "",
   vpn_password_saved: false,
   browser_headless: false,
+  direct_dola_submit_enabled: true,
   tts_default_voice: "en-US-AriaNeural",
   dola_mode: "hybrid",
 }
@@ -327,6 +328,17 @@ function VideoConsole({
     }
   }
 
+  async function setDirectDolaSubmitEnabled(value: boolean) {
+    try {
+      const saved = await api.saveSettings({ ...settings, direct_dola_submit_enabled: value })
+      onSettingsSaved(saved)
+      toast.success(value ? "Direct Dola HTTP submit enabled" : "Direct Dola HTTP submit disabled")
+      onRefresh()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to save direct submit setting")
+    }
+  }
+
   async function resumePoll(itemId: string) {
     if (!activeJob) return
     try {
@@ -403,6 +415,7 @@ function VideoConsole({
             onStop={stopGeneration}
             onKillAllSlots={killAllSlots}
             onSetBrowserHeadless={setBrowserHeadless}
+            onSetDirectDolaSubmitEnabled={setDirectDolaSubmitEnabled}
           />
           <GenerationQueue
             items={queueItems}
@@ -728,6 +741,7 @@ function GenerationSettings({
   onStop,
   onKillAllSlots,
   onSetBrowserHeadless,
+  onSetDirectDolaSubmitEnabled,
 }: {
   ratio: string
   setRatio: (value: string) => void
@@ -747,6 +761,7 @@ function GenerationSettings({
   onStop: () => void
   onKillAllSlots: () => void
   onSetBrowserHeadless: (value: boolean) => void
+  onSetDirectDolaSubmitEnabled: (value: boolean) => void
 }) {
   return (
     <Card className="p-4">
@@ -787,6 +802,20 @@ function GenerationSettings({
             </Button>
             <Button variant={settings.browser_headless ? "default" : "secondary"} className="h-8 px-3 text-xs" onClick={() => onSetBrowserHeadless(true)}>
               Headless
+            </Button>
+          </div>
+        </div>
+        <div className="flex min-h-10 flex-col gap-3 rounded-md border border-border bg-background px-3 py-3 sm:col-span-2 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <div className="text-xs font-black uppercase tracking-wide text-muted-foreground">Direct Dola HTTP Submit</div>
+            <div className="mt-1 text-[11px] font-semibold text-muted-foreground">When off, generation submits through the browser.</div>
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <Button variant={settings.direct_dola_submit_enabled ? "default" : "secondary"} className="h-8 px-3 text-xs" onClick={() => onSetDirectDolaSubmitEnabled(true)}>
+              On
+            </Button>
+            <Button variant={!settings.direct_dola_submit_enabled ? "default" : "secondary"} className="h-8 px-3 text-xs" onClick={() => onSetDirectDolaSubmitEnabled(false)}>
+              Off
             </Button>
           </div>
         </div>

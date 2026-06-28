@@ -1,5 +1,5 @@
 from app.services.dola import DolaSubmissionError
-from app.worker import BROWSER_SUBMIT_PARALLEL, effective_video_parallel, should_fallback_to_browser
+from app.worker import BROWSER_SUBMIT_PARALLEL, effective_video_parallel, resolve_effective_dola_mode, should_fallback_to_browser
 
 
 def test_browser_fallback_for_high_demand() -> None:
@@ -30,3 +30,14 @@ def test_effective_video_parallel_clamps_to_bounds() -> None:
 
 def test_browser_submit_parallel_is_separate_from_video_parallel() -> None:
     assert BROWSER_SUBMIT_PARALLEL == 5
+
+
+def test_disabled_direct_submit_forces_browser_for_all_modes() -> None:
+    assert resolve_effective_dola_mode("direct", 10, False) == "browser"
+    assert resolve_effective_dola_mode("hybrid", 10, False) == "browser"
+
+
+def test_enabled_direct_submit_preserves_existing_routing() -> None:
+    assert resolve_effective_dola_mode("direct", 10, True) == "direct"
+    assert resolve_effective_dola_mode("hybrid", 10, True) == "hybrid"
+    assert resolve_effective_dola_mode("hybrid", 15, True) == "browser"

@@ -59,6 +59,7 @@ def _default_settings() -> dict[str, Any]:
         "vpn_password": "",
         "vpn_password_saved": False,
         "browser_headless": False,
+        "direct_dola_submit_enabled": True,
         "tts_default_voice": settings.tts_default_voice,
         "dola_mode": settings.dola_mode if settings.dola_mode in {"direct", "browser", "hybrid"} else "hybrid",
     }

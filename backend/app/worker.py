@@ -67,6 +67,12 @@ def effective_video_parallel(value: object, max_parallel: int = MAX_DOLA_PARALLE
     return max(1, min(requested, max_parallel))
 
 
+def resolve_effective_dola_mode(configured_mode: str, duration: int, direct_submit_enabled: bool) -> str:
+    if not direct_submit_enabled:
+        return "browser"
+    return "browser" if configured_mode == "hybrid" and duration == 15 else configured_mode
+
+
 ACTIVE_RUN_KEY = "_active_run_id"
 
 
@@ -144,7 +150,8 @@ async def process_video(session: Session, job: Job, only_item_id: UUID | None = 
     if dola_mode not in {"direct", "browser", "hybrid"}:
         dola_mode = "hybrid"
     requested_duration = int(config.get("duration", 10))
-    effective_dola_mode = "browser" if dola_mode == "hybrid" and requested_duration == 15 else dola_mode
+    direct_dola_submit_enabled = bool(app_settings.get("direct_dola_submit_enabled", True))
+    effective_dola_mode = resolve_effective_dola_mode(dola_mode, requested_duration, direct_dola_submit_enabled)
     submit_client = DolaClient(app_settings.get("dola_auth_cookies", settings.dola_auth_cookies), settings.dola_default_region, proxy=proxy_url)
     poll_client = DolaClient(app_settings.get("dola_auth_cookies", settings.dola_auth_cookies), settings.dola_default_region)
     browser_client = DolaBrowserClient(proxy_url=proxy_url, headless=browser_headless)
@@ -155,7 +162,7 @@ async def process_video(session: Session, job: Job, only_item_id: UUID | None = 
     parallel = effective_video_parallel(requested_parallel)
     log(session, f"Video concurrency requested: {requested_parallel}", "info", job.id)
     log(session, f"Video concurrency effective: {parallel}", "info", job.id)
-    log(session, f"Video settings: duration={requested_duration}, ratio={config.get('ratio', '9:16')}, mode={effective_dola_mode}, submit_proxy_enabled={bool(proxy_url)}, vpn_enabled={vpn_enabled}, browser_headless={browser_headless}, polling_proxy_enabled=False", "info", job.id)
+    log(session, f"Video settings: duration={requested_duration}, ratio={config.get('ratio', '9:16')}, mode={effective_dola_mode}, direct_http_submit_enabled={direct_dola_submit_enabled}, submit_proxy_enabled={bool(proxy_url)}, vpn_enabled={vpn_enabled}, browser_headless={browser_headless}, polling_proxy_enabled=False", "info", job.id)
     max_retries = max(int(config.get("max_retries", 3)), HIGH_DEMAND_MIN_RETRIES)
     semaphore = asyncio.Semaphore(parallel)
     browser_submit_semaphore = asyncio.Semaphore(parallel if vpn_enabled else min(BROWSER_SUBMIT_PARALLEL, parallel))

@@ -18,6 +18,7 @@ def test_public_settings_default_to_hybrid_dola_mode(monkeypatch) -> None:
     settings = load_public_settings(MissingSession())
 
     assert settings["dola_mode"] == "hybrid"
+    assert settings["direct_dola_submit_enabled"] is True
 
 
 def make_session() -> Session:
@@ -56,3 +57,10 @@ def test_save_settings_persists_browser_headless() -> None:
         saved = save_app_settings(session, {"browser_headless": True})
 
         assert saved["browser_headless"] is True
+
+
+def test_save_settings_persists_direct_dola_submit_toggle() -> None:
+    with make_session() as session:
+        saved = save_app_settings(session, {"direct_dola_submit_enabled": False})
+
+        assert saved["direct_dola_submit_enabled"] is False

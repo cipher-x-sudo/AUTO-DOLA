@@ -93,6 +93,20 @@ def current_container_name() -> str:
     return socket.gethostname()
 
 
+def container_network_ip() -> str:
+    try:
+        output = subprocess.check_output(["ip", "-4", "-o", "addr", "show", "dev", "eth0"], text=True)
+        for token_index, token in enumerate(output.split()):
+            if token == "inet" and token_index + 1 < len(output.split()):
+                return output.split()[token_index + 1].split("/", 1)[0]
+    except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        return socket.gethostbyname(socket.gethostname())
+    except OSError as exc:
+        raise RuntimeError("CONTAINER_NETWORK_IP_UNAVAILABLE") from exc
+
+
 def current_docker_inspect() -> dict:
     data = docker_json(["inspect", current_container_name()])
     if not isinstance(data, list) or not data:
@@ -580,7 +594,7 @@ def launch_slot(proxy_url: str = "", profile_dir: str = "", headless: bool | Non
             if LOG_DIR.name.startswith("vpn-slot-"):
                 (LOG_DIR / "diagnostic.json").write_text(json.dumps(failure, indent=2), encoding="utf-8")
             raise RuntimeError(json.dumps(failure)) from exc
-        container_ip = socket.gethostbyname(socket.gethostname())
+        container_ip = container_network_ip()
         slot = {
             "slot_id": slot_id,
             "slot_number": slot_number,

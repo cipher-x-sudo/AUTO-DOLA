@@ -270,6 +270,14 @@ def test_isolated_vpn_slot_preserves_docker_stderr(monkeypatch, tmp_path: Path) 
     assert "network missing-network not found" in diagnostic.read_text(encoding="utf-8")
 
 
+def test_container_network_ip_uses_eth0_without_hostname_dns(monkeypatch) -> None:
+    manager = load_browser_manager()
+    monkeypatch.setattr(manager.subprocess, "check_output", lambda *_args, **_kwargs: "2: eth0    inet 172.24.0.9/16 brd 172.24.255.255 scope global eth0\n")
+    monkeypatch.setattr(manager.socket, "gethostbyname", lambda _host: (_ for _ in ()).throw(OSError("dns unavailable")))
+
+    assert manager.container_network_ip() == "172.24.0.9"
+
+
 def test_kill_all_closes_browser_slots_vpn_slots_and_vpn(monkeypatch) -> None:
     manager = load_browser_manager()
     manager.SLOTS.clear()
