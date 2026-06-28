@@ -323,10 +323,11 @@ class DolaBrowserClient:
         except Exception:
             return False
 
-    async def launch_isolated_vpn_slot(self, *, config_path: str, config_name: str, username: str, password: str) -> dict[str, Any]:
+    async def launch_isolated_vpn_slot(self, *, config_path: str, config_name: str, username: str, password: str, log_fn: Any = None) -> dict[str, Any]:
         async with httpx.AsyncClient(timeout=180) as client:
-            response = await client.post(
-                f"{resolve_cdp_url(self.manager_url).rstrip('/')}/vpn-slot/launch",
+            manager_url = resolve_cdp_url(self.manager_url).rstrip("/")
+            launch_task = asyncio.create_task(client.post(
+                f"{manager_url}/vpn-slot/launch",
                 json={
                     "config_path": config_path,
                     "config_name": config_name,
@@ -334,7 +335,25 @@ class DolaBrowserClient:
                     "password": password,
                     "headless": self.headless,
                 },
-            )
+            ))
+            started = time.monotonic()
+            while not launch_task.done():
+                done, _ = await asyncio.wait({launch_task}, timeout=5)
+                if done:
+                    break
+                elapsed = int(time.monotonic() - started)
+                stage = "container_starting"
+                try:
+                    status_response = await client.get(f"{manager_url}/status", timeout=3)
+                    slots = status_response.json().get("vpn_slots") or []
+                    matches = [slot for slot in slots if slot.get("config_name") == config_name]
+                    if matches:
+                        stage = str(max(matches, key=lambda slot: slot.get("started_at", 0)).get("stage") or stage)
+                except Exception:
+                    pass
+                if log_fn:
+                    log_fn(f"VPN slot {stage}: {elapsed}s/120s config={config_name}", "info")
+            response = await launch_task
             try:
                 payload = response.json()
             except ValueError:
@@ -376,6 +395,20 @@ class DolaBrowserClient:
                 str(payload.get("error") or "VPN_SLOT_LAUNCH_FAILED"),
             )
         return payload
+
+    async def update_isolated_vpn_slot_stage(self, slot_id: str, stage: str) -> bool:
+        if not slot_id:
+            return False
+        try:
+            async with httpx.AsyncClient(timeout=5) as client:
+                response = await client.post(
+                    f"{resolve_cdp_url(self.manager_url).rstrip('/')}/vpn-slot/stage",
+                    json={"slot_id": slot_id, "stage": stage},
+                )
+                response.raise_for_status()
+                return bool(response.json().get("updated"))
+        except Exception:
+            return False
 
     async def close_isolated_vpn_slot(self, *, slot_id: str = "", container_name: str = "") -> bool:
         try:

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import shutil
+import time
 from pathlib import Path
 from typing import Callable
 from urllib.parse import urlparse
@@ -166,6 +168,29 @@ async def process_video(session: Session, job: Job, only_item_id: UUID | None = 
     max_retries = max(int(config.get("max_retries", 3)), HIGH_DEMAND_MIN_RETRIES)
     semaphore = asyncio.Semaphore(parallel)
     browser_submit_semaphore = asyncio.Semaphore(parallel if vpn_enabled else min(BROWSER_SUBMIT_PARALLEL, parallel))
+    vpn_quarantine: dict[str, float] = {}
+    vpn_auth_failed = asyncio.Event()
+    vpn_selection_lock = asyncio.Lock()
+
+    async def select_vpn_config() -> dict:
+        async with vpn_selection_lock:
+            now = time.monotonic()
+            expired = [name for name, until in vpn_quarantine.items() if until <= now]
+            for name in expired:
+                vpn_quarantine.pop(name, None)
+            if vpn_auth_failed.is_set():
+                raise DolaBrowserError("OpenVPN credentials were rejected for this job.", {"error_type": "VPN_AUTH_FAILED"}, "VPN_AUTH_FAILED")
+            try:
+                return choose_vpn_config(excluded_names=set(vpn_quarantine))
+            except ValueError as exc:
+                raise DolaBrowserError("All OpenVPN configurations are temporarily unavailable.", {"error_type": "VPN_CONFIGS_QUARANTINED", "quarantined_configs": sorted(vpn_quarantine)}, "VPN_CONFIGS_QUARANTINED") from exc
+
+    async def quarantine_vpn_config(config_name: str, error_type: str) -> None:
+        async with vpn_selection_lock:
+            if error_type == "VPN_AUTH_FAILED":
+                vpn_auth_failed.set()
+            elif error_type in {"VPN_CONNECT_TIMEOUT", "VPN_ENDPOINT_UNREACHABLE", "VPN_TLS_FAILED"}:
+                vpn_quarantine[config_name] = time.monotonic() + 600
 
     def ensure_not_cancelled(session_local: Session, item_id: UUID | None = None) -> JobItem | None:
         session_local.expire_all()

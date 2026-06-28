@@ -134,7 +134,7 @@ def mounted_volume_name(destination: str, fallback: str) -> str:
     raise RuntimeError(f"VPN_SLOT_VOLUME_MISSING:{destination}")
 
 
-def wait_for_manager(url: str, timeout: float = 45.0) -> None:
+def wait_for_manager(url: str, timeout: float = 30.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
@@ -182,6 +182,21 @@ def launch_isolated_vpn_slot(config_path: str, config_name: str, username: str, 
     profile_volume = mounted_volume_name("/data/browser-profile", SLOT_PROFILE_VOLUME)
     profiles_volume = mounted_volume_name("/data/profiles", SLOT_PROFILES_VOLUME)
     logs_volume = mounted_volume_name("/data/logs", SLOT_LOGS_VOLUME)
+    slot = {
+        "slot_id": slot_id,
+        "container_name": container_name,
+        "manager_url": f"http://{container_name}:7070",
+        "profile_root": child_profile_root,
+        "headless": headless,
+        "config_name": config_name or config.name,
+        "username_masked": mask_username(username),
+        "ip": "",
+        "stage": "container_starting",
+        "stage_started_at": time.time(),
+        "started_at": time.time(),
+    }
+    with LOCK:
+        VPN_SLOT_CONTAINERS[slot_id] = slot
     command = [
             "docker",
             "run",
@@ -213,7 +228,10 @@ def launch_isolated_vpn_slot(config_path: str, config_name: str, username: str, 
             f"{logs_volume}:/data/logs",
             SLOT_IMAGE,
         ]
-    launch = subprocess.run(command, capture_output=True, text=True, check=False)
+    try:
+        launch = subprocess.run(command, capture_output=True, text=True, check=False, timeout=30)
+    except subprocess.TimeoutExpired as exc:
+        launch = subprocess.CompletedProcess(command, 124, exc.stdout or "", exc.stderr or "docker run timed out after 30 seconds")
     if launch.returncode:
         detail = (launch.stderr or launch.stdout or f"docker exited with status {launch.returncode}").strip()
         log_urls = write_slot_diagnostics(slot_id, {
@@ -224,10 +242,14 @@ def launch_isolated_vpn_slot(config_path: str, config_name: str, username: str, 
             "container_name": container_name,
             "config_name": config_name or config.name,
         }, f"stdout:\n{launch.stdout}\n\nstderr:\n{launch.stderr}")
+        with LOCK:
+            VPN_SLOT_CONTAINERS.pop(slot_id, None)
         raise VpnSlotLaunchError("VPN_SLOT_CONTAINER_LAUNCH_FAILED", detail, slot_id, container_name)
     manager_url = f"http://{container_name}:7070"
     try:
         wait_for_manager(manager_url)
+        update_vpn_slot_stage(slot_id, "manager_ready")
+        update_vpn_slot_stage(slot_id, "vpn_connecting")
         vpn_result = manager_post(
             manager_url,
             "/vpn/connect",
@@ -237,8 +259,9 @@ def launch_isolated_vpn_slot(config_path: str, config_name: str, username: str, 
                 "username": username,
                 "password": password,
             },
-            timeout=120,
+            timeout=95,
         )
+        update_vpn_slot_stage(slot_id, "vpn_connected", ip=vpn_result.get("ip", ""))
     except Exception as exc:
         docker_logs = subprocess.run(["docker", "logs", container_name], capture_output=True, text=True, check=False)
         child_payload = exc.payload if isinstance(exc, ManagerRequestError) else {}
@@ -252,18 +275,14 @@ def launch_isolated_vpn_slot(config_path: str, config_name: str, username: str, 
             "config_name": config_name or config.name,
         }, f"stdout:\n{docker_logs.stdout}\n\nstderr:\n{docker_logs.stderr}")
         subprocess.call(["docker", "rm", "-f", container_name])
+        with LOCK:
+            VPN_SLOT_CONTAINERS.pop(slot_id, None)
         raise VpnSlotLaunchError(error, detail, slot_id, container_name) from exc
-    slot = {
+    slot.update({
         "ok": True,
-        "slot_id": slot_id,
-        "container_name": container_name,
-        "manager_url": manager_url,
-        "profile_root": child_profile_root,
-        "headless": headless,
-        "config_name": config_name or config.name,
-        "username_masked": mask_username(username),
         "ip": vpn_result.get("ip", ""),
-        "started_at": time.time(),
+        "stage": "vpn_connected",
+        "stage_started_at": time.time(),
         "log_urls": write_slot_diagnostics(slot_id, {
             "ok": True,
             "slot_id": slot_id,
@@ -271,15 +290,26 @@ def launch_isolated_vpn_slot(config_path: str, config_name: str, username: str, 
             "config_name": config_name or config.name,
             "ip": vpn_result.get("ip", ""),
         }),
-    }
+    })
     with LOCK:
         VPN_SLOT_CONTAINERS[slot_id] = slot
     return slot
 
 
+def update_vpn_slot_stage(slot_id: str, stage: str, **metadata: object) -> bool:
+    with LOCK:
+        slot = VPN_SLOT_CONTAINERS.get(slot_id)
+        if not slot:
+            return False
+        slot.update({"stage": stage, "stage_started_at": time.time(), **metadata})
+    return True
+
+
 def close_isolated_vpn_slot(slot_id: str = "", container_name: str = "") -> bool:
     with LOCK:
-        slot = VPN_SLOT_CONTAINERS.pop(slot_id, None) if slot_id else None
+        slot = VPN_SLOT_CONTAINERS.get(slot_id) if slot_id else None
+        if slot:
+            slot.update({"stage": "closing", "stage_started_at": time.time()})
     name = container_name or str((slot or {}).get("container_name") or "")
     manager_url = str((slot or {}).get("manager_url") or (f"http://{name}:7070" if name else ""))
     if manager_url:
@@ -289,6 +319,9 @@ def close_isolated_vpn_slot(slot_id: str = "", container_name: str = "") -> bool
             pass
     if name:
         subprocess.call(["docker", "rm", "-f", name])
+        with LOCK:
+            if slot_id:
+                VPN_SLOT_CONTAINERS.pop(slot_id, None)
         return True
     return False
 
@@ -793,6 +826,13 @@ class Handler(BaseHTTPRequestHandler):
                         ),
                     },
                 )
+                return
+            if self.path == "/vpn-slot/stage":
+                updated = update_vpn_slot_stage(
+                    str(payload.get("slot_id") or ""),
+                    str(payload.get("stage") or ""),
+                )
+                json_response(self, 200, {"ok": True, "updated": updated})
                 return
             if self.path == "/kill-all":
                 json_response(self, 200, kill_all())

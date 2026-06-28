@@ -60,8 +60,9 @@ def delete_vpn_config(name: str) -> bool:
     return False
 
 
-def choose_vpn_config(config_name: str = "") -> dict[str, Any]:
-    configs = list_vpn_configs()
+def choose_vpn_config(config_name: str = "", excluded_names: set[str] | None = None) -> dict[str, Any]:
+    excluded = excluded_names or set()
+    configs = [config for config in list_vpn_configs() if config["name"] not in excluded]
     if not configs:
         raise ValueError("VPN_CONFIG_MISSING")
     if config_name:
