@@ -51,15 +51,6 @@ def test_save_settings_direct_clears_proxy_and_vpn_but_keeps_password() -> None:
         assert private["vpn_password"] == "secret"
 
 
-def test_save_settings_clamps_vpn_browser_slots() -> None:
-    with make_session() as session:
-        high = save_app_settings(session, {"vpn_browser_slots": 999})
-        bad = save_app_settings(session, {"vpn_browser_slots": "bad"})
-
-        assert high["vpn_browser_slots"] == 50
-        assert bad["vpn_browser_slots"] == 5
-
-
 def test_save_settings_persists_browser_headless() -> None:
     with make_session() as session:
         saved = save_app_settings(session, {"browser_headless": True})

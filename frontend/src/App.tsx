@@ -58,7 +58,6 @@ const emptySettings: SettingsPayload = {
   vpn_usernames: "",
   vpn_password: "",
   vpn_password_saved: false,
-  vpn_browser_slots: 5,
   browser_headless: false,
   tts_default_voice: "en-US-AriaNeural",
   dola_mode: "hybrid",
@@ -469,7 +468,6 @@ function SettingsPage({
   const [proxyUrl, setProxyUrl] = useState(settings.proxy_url || "")
   const [vpnUsernames, setVpnUsernames] = useState(settings.vpn_usernames || "")
   const [vpnPassword, setVpnPassword] = useState("")
-  const [vpnBrowserSlots, setVpnBrowserSlots] = useState(settings.vpn_browser_slots || 5)
   const [vpnConfigs, setVpnConfigs] = useState<Array<{ name: string; size_bytes: number }>>([])
   const [vpnStatus, setVpnStatus] = useState<{ connected: boolean; config_name?: string; username_masked?: string; ip?: string } | null>(null)
   const [saving, setSaving] = useState(false)
@@ -484,7 +482,6 @@ function SettingsPage({
     setProxyUrl(settings.proxy_url || "")
     setVpnUsernames(settings.vpn_usernames || "")
     setVpnPassword("")
-    setVpnBrowserSlots(settings.vpn_browser_slots || 5)
   }, [settings, settingsDirty])
 
   useEffect(() => {
@@ -501,7 +498,6 @@ function SettingsPage({
         vpn_enabled: networkMode === "vpn",
         vpn_usernames: vpnUsernames,
         vpn_password: vpnPassword,
-        vpn_browser_slots: vpnBrowserSlots,
       })
       setSettingsDirty(false)
       onSettingsSaved(saved)
@@ -566,7 +562,7 @@ function SettingsPage({
   async function testVpn() {
     setTestingVpn(true)
     try {
-      const saved = await api.saveSettings({ ...settings, proxy_enabled: false, vpn_enabled: true, vpn_usernames: vpnUsernames, vpn_password: vpnPassword, vpn_browser_slots: vpnBrowserSlots })
+      const saved = await api.saveSettings({ ...settings, proxy_enabled: false, vpn_enabled: true, vpn_usernames: vpnUsernames, vpn_password: vpnPassword })
       setSettingsDirty(false)
       onSettingsSaved(saved)
       const result = await api.testVpn()
@@ -640,12 +636,6 @@ function SettingsPage({
                 setVpnPassword(event.target.value)
                 setSettingsDirty(true)
               }} placeholder={settings.vpn_password_saved ? "Leave blank to keep saved password" : "Shared VPN password"} />
-            </Field>
-            <Field label="VPN browser slots">
-              <Input type="number" min={1} max={50} value={vpnBrowserSlots} onChange={(event) => {
-                setVpnBrowserSlots(Math.max(1, Math.min(50, Number(event.target.value) || 1)))
-                setSettingsDirty(true)
-              }} />
             </Field>
             <input ref={vpnFileRef} type="file" accept=".ovpn" multiple className="hidden" onChange={(event) => uploadVpnFiles(event.target.files)} />
             <div className="grid grid-cols-3 gap-2">

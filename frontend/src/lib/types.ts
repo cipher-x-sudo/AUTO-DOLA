@@ -55,7 +55,6 @@ export interface SettingsPayload {
   vpn_usernames: string
   vpn_password: string
   vpn_password_saved: boolean
-  vpn_browser_slots: number
   browser_headless: boolean
   tts_default_voice: string
   dola_mode: "direct" | "browser" | "hybrid"

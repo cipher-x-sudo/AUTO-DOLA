@@ -58,7 +58,6 @@ def _default_settings() -> dict[str, Any]:
         "vpn_usernames": "",
         "vpn_password": "",
         "vpn_password_saved": False,
-        "vpn_browser_slots": 5,
         "browser_headless": False,
         "tts_default_voice": settings.tts_default_voice,
         "dola_mode": settings.dola_mode if settings.dola_mode in {"direct", "browser", "hybrid"} else "hybrid",
@@ -82,10 +81,6 @@ def save_app_settings(session: Session, value: dict[str, Any]) -> dict[str, Any]
         next_value["proxy_enabled"] = False
     elif next_value.get("proxy_enabled"):
         next_value["vpn_enabled"] = False
-    try:
-        next_value["vpn_browser_slots"] = max(1, min(int(next_value.get("vpn_browser_slots") or 5), 50))
-    except (TypeError, ValueError):
-        next_value["vpn_browser_slots"] = 5
     next_value.pop("vpn_password_saved", None)
     set_setting(session, "app_settings", next_value)
     return load_app_settings(session)

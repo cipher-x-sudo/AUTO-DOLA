@@ -153,13 +153,12 @@ async def process_video(session: Session, job: Job, only_item_id: UUID | None = 
     run_items = [item for item in items if only_item_id is None or item.id == only_item_id]
     requested_parallel = config.get("parallel", 1)
     parallel = effective_video_parallel(requested_parallel)
-    vpn_browser_slots = effective_video_parallel(app_settings.get("vpn_browser_slots", 5))
     log(session, f"Video concurrency requested: {requested_parallel}", "info", job.id)
     log(session, f"Video concurrency effective: {parallel}", "info", job.id)
-    log(session, f"Video settings: duration={requested_duration}, ratio={config.get('ratio', '9:16')}, mode={effective_dola_mode}, submit_proxy_enabled={bool(proxy_url)}, vpn_enabled={vpn_enabled}, vpn_browser_slots={vpn_browser_slots}, browser_headless={browser_headless}, polling_proxy_enabled=False", "info", job.id)
+    log(session, f"Video settings: duration={requested_duration}, ratio={config.get('ratio', '9:16')}, mode={effective_dola_mode}, submit_proxy_enabled={bool(proxy_url)}, vpn_enabled={vpn_enabled}, browser_headless={browser_headless}, polling_proxy_enabled=False", "info", job.id)
     max_retries = max(int(config.get("max_retries", 3)), HIGH_DEMAND_MIN_RETRIES)
     semaphore = asyncio.Semaphore(parallel)
-    browser_submit_semaphore = asyncio.Semaphore(min(vpn_browser_slots, parallel) if vpn_enabled else min(BROWSER_SUBMIT_PARALLEL, parallel))
+    browser_submit_semaphore = asyncio.Semaphore(parallel if vpn_enabled else min(BROWSER_SUBMIT_PARALLEL, parallel))
 
     def ensure_not_cancelled(session_local: Session, item_id: UUID | None = None) -> JobItem | None:
         session_local.expire_all()
