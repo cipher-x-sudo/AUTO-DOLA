@@ -2,9 +2,15 @@ import type { DolaBrowserStatus, Job, Niche, NichePromptGroup, SettingsPayload }
 
 export const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:8000"
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+async function request<T>(path: string, init?: RequestInit, timeoutMs = 10000): Promise<T> {
+  const controller = new AbortController()
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs)
+  const externalSignal = init?.signal
+  if (externalSignal) externalSignal.addEventListener("abort", () => controller.abort(), { once: true })
+  try {
   const response = await fetch(`${API_BASE}${path}`, {
     ...init,
+    signal: controller.signal,
     headers: {
       "Content-Type": "application/json",
       ...(init?.headers ?? {}),
@@ -14,6 +20,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new Error(await response.text())
   }
   return response.json()
+  } finally {
+    window.clearTimeout(timeout)
+  }
 }
 
 export const api = {
@@ -36,7 +45,8 @@ export const api = {
   testIsolatedVpn: (config_name = "") => request<{ ok: boolean; slot_id: string; config_name?: string; username_masked?: string; ip?: string; cdp: boolean; log_urls?: Record<string, string> }>("/api/vpn/test-isolated", { method: "POST", body: JSON.stringify({ config_name }) }),
   ffmpeg: () => request<{ available: boolean; path: string }>("/api/system/ffmpeg"),
   chrome: () => request<{ available: boolean; path: string }>("/api/system/chrome"),
-  dolaBrowser: () => request<DolaBrowserStatus>("/api/system/dola-browser"),
+  dolaBrowser: () => request<DolaBrowserStatus>("/api/system/dola-browser", undefined, 5000),
+  studioStatus: () => request<{ jobs: Job[]; settings: SettingsPayload; logs: Array<{ id: string; level: string; message: string; created_at: string; job_id?: string | null }>; browser: DolaBrowserStatus }>("/api/studio/status", undefined, 10000),
   killAllDolaBrowserSlots: () => request<{ ok: boolean; closed_browser_slots: number; closed_vpn_slots: number; vpn_disconnected: boolean }>("/api/system/dola-browser/kill-all", { method: "POST" }),
   videoJobs: () => request<Job[]>("/api/video/jobs"),
   createVideoJob: (payload: unknown) => request<Job>("/api/video/jobs", { method: "POST", body: JSON.stringify(payload) }),

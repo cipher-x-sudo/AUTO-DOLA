@@ -28,6 +28,7 @@ services:
       BROWSER_SLOT_IMAGE: ${AUTO_DOLA_BROWSER_SLOT_IMAGE:-auto-dola-browser}
       DOCKER_API_VERSION: "1.44"
     shm_size: "1gb"
+    restart: unless-stopped
     cap_add:
       - NET_ADMIN
     devices:
@@ -41,12 +42,19 @@ services:
       - auto_dola_browser_profile:/data/browser-profile
       - auto_dola_profiles:/data/profiles
       - auto_dola_logs:/data/logs
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:7070/status >/dev/null"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 15s
 
   api:
     build:
       context: ./backend
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    restart: unless-stopped
     env_file:
       - path: .env
         required: false
@@ -80,7 +88,7 @@ services:
       redis:
         condition: service_started
       browser:
-        condition: service_started
+        condition: service_healthy
 
   worker:
     build:
@@ -88,6 +96,7 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     command: ["python", "-m", "app.worker"]
+    restart: unless-stopped
     env_file:
       - path: .env
         required: false
@@ -119,7 +128,7 @@ services:
       redis:
         condition: service_started
       browser:
-        condition: service_started
+        condition: service_healthy
 
   web:
     build:

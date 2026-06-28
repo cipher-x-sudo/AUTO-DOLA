@@ -117,7 +117,11 @@ export default function App() {
   const [logs, setLogs] = useState<LogRow[]>([])
   const [browserStatus, setBrowserStatus] = useState<DolaBrowserStatus | null>(null)
   const [loading, setLoading] = useState(true)
+  const [connectionError, setConnectionError] = useState("")
   const [studioPromptText, setStudioPromptText] = useState("")
+  const refreshInFlightRef = useRef(false)
+  const refreshQueuedRef = useRef(false)
+  const sseRefreshTimerRef = useRef<number | null>(null)
 
   useEffect(() => {
     document.documentElement.classList.add("dark")
@@ -145,34 +149,72 @@ export default function App() {
     }
   }, [])
 
-  const refresh = useCallback(async () => {
+  const performRefresh = useCallback(async () => {
     try {
-      const [videoJobs, appSettings, logRows, dolaBrowser] = await Promise.all([api.videoJobs(), api.settings(), api.logs(), api.dolaBrowser()])
-      setJobs(videoJobs)
-      setSettings(appSettings)
-      setLogs(logRows)
-      setBrowserStatus(dolaBrowser)
+      const status = await api.studioStatus()
+      setJobs(status.jobs)
+      setSettings(status.settings)
+      setLogs(status.logs)
+      setBrowserStatus(status.browser)
+      setConnectionError("")
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Failed to refresh")
+      setConnectionError(error instanceof Error ? error.message : "Studio connection failed")
     } finally {
       setLoading(false)
     }
   }, [])
 
+  const refresh = useCallback(async () => {
+    if (refreshInFlightRef.current) {
+      refreshQueuedRef.current = true
+      return
+    }
+    refreshInFlightRef.current = true
+    try {
+      do {
+        refreshQueuedRef.current = false
+        await performRefresh()
+      } while (refreshQueuedRef.current)
+    } finally {
+      refreshInFlightRef.current = false
+    }
+  }, [performRefresh])
+
+  const runningJobIds = useMemo(() => jobs.filter((job) => job.status === "running" || job.status === "queued").map((job) => job.id).sort().join(","), [jobs])
+
   useEffect(() => {
     refresh()
-    const id = setInterval(refresh, 5000)
-    return () => clearInterval(id)
-  }, [refresh])
-
-  const runningJobIds = useMemo(() => jobs.filter((job) => job.status === "running" || job.status === "queued").map((job) => job.id).join(","), [jobs])
+    let timer: number | undefined
+    const schedule = () => {
+      timer = window.setTimeout(async () => {
+        if (!document.hidden) await refresh()
+        schedule()
+      }, runningJobIds ? 5000 : 15000)
+    }
+    const onVisibilityChange = () => {
+      if (!document.hidden) refresh()
+    }
+    schedule()
+    document.addEventListener("visibilitychange", onVisibilityChange)
+    return () => {
+      if (timer) window.clearTimeout(timer)
+      document.removeEventListener("visibilitychange", onVisibilityChange)
+    }
+  }, [refresh, runningJobIds])
 
   useEffect(() => {
-    const activeJobs = jobs.filter((job) => job.status === "running" || job.status === "queued")
-    if (!activeJobs.length) return
-    const cleanups = activeJobs.map((job) => subscribeJobEvents(job.id, () => refresh(), () => undefined))
-    return () => cleanups.forEach((cleanup) => cleanup())
-  }, [jobs, refresh, runningJobIds])
+    const activeJobIds = runningJobIds ? runningJobIds.split(",") : []
+    if (!activeJobIds.length) return
+    const requestDebouncedRefresh = () => {
+      if (sseRefreshTimerRef.current) window.clearTimeout(sseRefreshTimerRef.current)
+      sseRefreshTimerRef.current = window.setTimeout(() => refresh(), 500)
+    }
+    const cleanups = activeJobIds.map((jobId) => subscribeJobEvents(jobId, requestDebouncedRefresh, () => undefined))
+    return () => {
+      cleanups.forEach((cleanup) => cleanup())
+      if (sseRefreshTimerRef.current) window.clearTimeout(sseRefreshTimerRef.current)
+    }
+  }, [refresh, runningJobIds])
 
   const activeJob = useMemo(() => jobs.find((job) => job.status === "running" || job.status === "queued") ?? jobs[0], [jobs])
   const activeLogs = useMemo(
@@ -186,6 +228,7 @@ export default function App() {
 
   return (
     <Layout page={page} setPage={(next) => navigate(next as Page)} loading={loading}>
+      {connectionError && <div className="mb-3 rounded-md border border-red-500/40 bg-red-950/40 px-3 py-2 text-xs font-semibold text-red-200">Connection issue: {connectionError}</div>}
       {page === "video" && (
         <VideoConsole
           settings={settings}
