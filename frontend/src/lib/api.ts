@@ -25,6 +25,16 @@ async function request<T>(path: string, init?: RequestInit, timeoutMs = 10000): 
   }
 }
 
+function normalizeJob(job: Job): Job {
+  return {
+    ...job,
+    config_json: job.config_json ?? {},
+    dola_cookie_snapshots_json: Array.isArray(job.dola_cookie_snapshots_json) ? job.dola_cookie_snapshots_json : [],
+    items: Array.isArray(job.items) ? job.items : [],
+    artifacts: Array.isArray(job.artifacts) ? job.artifacts : [],
+  }
+}
+
 export const api = {
   health: () => request<{ ok: boolean; service: string }>("/api/health"),
   settings: () => request<SettingsPayload>("/api/settings"),
@@ -46,11 +56,20 @@ export const api = {
   ffmpeg: () => request<{ available: boolean; path: string }>("/api/system/ffmpeg"),
   chrome: () => request<{ available: boolean; path: string }>("/api/system/chrome"),
   dolaBrowser: () => request<DolaBrowserStatus>("/api/system/dola-browser", undefined, 5000),
-  studioStatus: () => request<{ jobs: Job[]; settings: SettingsPayload; logs: Array<{ id: string; level: string; message: string; created_at: string; job_id?: string | null }>; browser: DolaBrowserStatus }>("/api/studio/status", undefined, 10000),
+  studioStatus: async () => {
+    const status = await request<{ jobs: Job[]; settings: SettingsPayload; logs: Array<{ id: string; level: string; message: string; created_at: string; job_id?: string | null }>; browser: DolaBrowserStatus }>("/api/studio/status", undefined, 10000)
+    return {
+      ...status,
+      jobs: Array.isArray(status.jobs) ? status.jobs.map(normalizeJob) : [],
+    }
+  },
   killAllDolaBrowserSlots: () => request<{ ok: boolean; closed_browser_slots: number; closed_vpn_slots: number; vpn_disconnected: boolean }>("/api/system/dola-browser/kill-all", { method: "POST" }),
-  videoJobs: () => request<Job[]>("/api/video/jobs"),
-  createVideoJob: (payload: unknown) => request<Job>("/api/video/jobs", { method: "POST", body: JSON.stringify(payload) }),
-  cancelVideoJob: (id: string) => request<Job>(`/api/video/jobs/${id}/cancel`, { method: "POST" }),
+  videoJobs: async () => {
+    const jobs = await request<Job[]>("/api/video/jobs")
+    return Array.isArray(jobs) ? jobs.map(normalizeJob) : []
+  },
+  createVideoJob: async (payload: unknown) => normalizeJob(await request<Job>("/api/video/jobs", { method: "POST", body: JSON.stringify(payload) })),
+  cancelVideoJob: async (id: string) => normalizeJob(await request<Job>(`/api/video/jobs/${id}/cancel`, { method: "POST" })),
   resumeVideoItemPoll: (jobId: string, itemId: string) => request<{ ok: boolean; queued: boolean }>(`/api/video/jobs/${jobId}/items/${itemId}/resume-poll`, { method: "POST" }),
   forceStopVideoItem: (jobId: string, itemId: string) => request<{ ok: boolean; stopped: boolean }>(`/api/video/jobs/${jobId}/items/${itemId}/force-stop`, { method: "POST" }),
   restartVideoItem: (jobId: string, itemId: string) => request<{ ok: boolean; queued: boolean }>(`/api/video/jobs/${jobId}/items/${itemId}/restart`, { method: "POST" }),
