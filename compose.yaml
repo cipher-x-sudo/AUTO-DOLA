@@ -49,6 +49,22 @@ services:
       retries: 3
       start_period: 15s
 
+  niches-init:
+    image: alpine:3.20
+    restart: "no"
+    command:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        if [ ! -f /data/niches/.initialized ]; then
+          cp /seed/*.txt /data/niches/
+          touch /data/niches/.initialized
+        fi
+    volumes:
+      - ./niches:/seed:ro
+      - auto_dola_niches:/data/niches
+
   api:
     build:
       context: ./backend
@@ -79,7 +95,7 @@ services:
         target: /data/downloads
       - auto_dola_profiles:/data/profiles
       - auto_dola_logs:/data/logs
-      - ./niches:/data/niches:ro
+      - auto_dola_niches:/data/niches
       - ./generated-prompts:/data/generated-prompts
       - ./secrets:/run/secrets:ro
     depends_on:
@@ -89,6 +105,8 @@ services:
         condition: service_started
       browser:
         condition: service_healthy
+      niches-init:
+        condition: service_completed_successfully
 
   worker:
     build:
@@ -119,7 +137,7 @@ services:
         target: /data/downloads
       - auto_dola_profiles:/data/profiles
       - auto_dola_logs:/data/logs
-      - ./niches:/data/niches:ro
+      - auto_dola_niches:/data/niches:ro
       - ./generated-prompts:/data/generated-prompts
       - ./secrets:/run/secrets:ro
     depends_on:
@@ -129,6 +147,8 @@ services:
         condition: service_started
       browser:
         condition: service_healthy
+      niches-init:
+        condition: service_completed_successfully
 
   web:
     build:
@@ -145,5 +165,7 @@ volumes:
   auto_dola_pgdata:
   auto_dola_redis:
   auto_dola_profiles:
+  auto_dola_niches:
+    name: auto_dola_niches
   auto_dola_logs:
   auto_dola_browser_profile:

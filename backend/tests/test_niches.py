@@ -31,6 +31,27 @@ def test_resolve_niches_rejects_unknown_ids(tmp_path: Path) -> None:
         niche_service.resolve_niches(["missing"], tmp_path)
 
 
+def test_delete_niche_removes_only_requested_file(tmp_path: Path) -> None:
+    target = write_niche(tmp_path, "target.txt")
+    survivor = write_niche(tmp_path, "survivor.txt")
+
+    deleted = niche_service.delete_niche("target", tmp_path)
+
+    assert deleted.id == "target"
+    assert not target.exists()
+    assert survivor.exists()
+
+
+@pytest.mark.parametrize("niche_id", ["missing", "../target", "target/../../outside"])
+def test_delete_niche_rejects_unknown_or_malformed_ids(tmp_path: Path, niche_id: str) -> None:
+    target = write_niche(tmp_path, "target.txt")
+
+    with pytest.raises(ValueError, match="Unknown niche"):
+        niche_service.delete_niche(niche_id, tmp_path)
+
+    assert target.exists()
+
+
 def test_split_global_count_totals_and_covers_every_selected_niche() -> None:
     counts = niche_service.split_global_count(11, 5)
 

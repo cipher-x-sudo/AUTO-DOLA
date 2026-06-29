@@ -1209,6 +1209,7 @@ function PromptGenerator({
   const [nicheSearch, setNicheSearch] = useState("")
   const [selectedNicheIds, setSelectedNicheIds] = useState<string[]>([])
   const [favoriteNicheIds, setFavoriteNicheIds] = useState<string[]>(loadFavoriteNicheIds)
+  const [deletingNicheId, setDeletingNicheId] = useState<string | null>(null)
   const [generated, setGenerated] = useState<string[]>([])
   const [generatedGroups, setGeneratedGroups] = useState<NichePromptGroup[]>([])
   const [generating, setGenerating] = useState(false)
@@ -1470,6 +1471,22 @@ function PromptGenerator({
     ))
   }
 
+  async function deleteMasterPrompt(niche: Niche) {
+    if (!window.confirm(`Permanently delete the master prompt "${niche.name}"? This cannot be undone.`)) return
+    setDeletingNicheId(niche.id)
+    try {
+      await api.deleteNiche(niche.id)
+      setNiches((current) => current.filter((item) => item.id !== niche.id))
+      setSelectedNicheIds((current) => current.filter((item) => item !== niche.id))
+      setFavoriteNicheIds((current) => current.filter((item) => item !== niche.id))
+      toast.success(`Deleted master prompt: ${niche.name}`)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to delete master prompt")
+    } finally {
+      setDeletingNicheId(null)
+    }
+  }
+
   function selectVisibleNiches() {
     setSelectedNicheIds((current) => [...new Set([...current, ...filteredNiches.map((niche) => niche.id)])])
   }
@@ -1601,6 +1618,16 @@ function PromptGenerator({
                           className={`inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md transition hover:bg-muted ${isFavorite ? "text-amber-400" : "text-muted-foreground hover:text-amber-400"}`}
                         >
                           <Star size={16} fill={isFavorite ? "currentColor" : "none"} />
+                        </button>
+                        <button
+                          type="button"
+                          aria-label={`Delete ${niche.name}`}
+                          title="Delete master prompt"
+                          onClick={() => deleteMasterPrompt(niche)}
+                          disabled={generating || deletingNicheId !== null}
+                          className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-red-400 transition hover:bg-red-500/10 hover:text-red-300 disabled:cursor-not-allowed disabled:opacity-40"
+                        >
+                          {deletingNicheId === niche.id ? <Loader2 className="animate-spin" size={16} /> : <Trash2 size={16} />}
                         </button>
                       </div>
                     )

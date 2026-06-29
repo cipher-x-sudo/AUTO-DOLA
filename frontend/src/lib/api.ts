@@ -87,6 +87,8 @@ export const api = {
   createTtsJob: (payload: unknown) => request<Job>("/api/tts/jobs", { method: "POST", body: JSON.stringify(payload) }),
   logs: () => request<Array<{ id: string; level: string; message: string; created_at: string; job_id?: string }>>("/api/video/logs"),
   niches: () => request<Niche[]>("/api/niches"),
+  deleteNiche: (id: string) =>
+    request<{ deleted: boolean; niche_id: string }>(`/api/niches/${encodeURIComponent(id)}`, { method: "DELETE" }),
   generateNichePrompts: (payload: unknown) =>
     request<{ groups: NichePromptGroup[]; model: string }>("/api/prompts/generate-niches", { method: "POST", body: JSON.stringify(payload) }),
   saveNichePrompts: (payload: unknown) =>

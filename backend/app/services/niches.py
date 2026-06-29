@@ -48,6 +48,19 @@ def resolve_niches(niche_ids: list[str], niches_dir: Path | None = None) -> list
     return [by_id[niche_id] for niche_id in niche_ids]
 
 
+def delete_niche(niche_id: str, niches_dir: Path | None = None) -> NicheFile:
+    root = (niches_dir or settings.niches_dir).resolve()
+    niche = resolve_niches([niche_id], root)[0]
+    path = root / Path(niche.filename).name
+    if path.parent.resolve() != root:
+        raise ValueError("Invalid niche path.")
+    try:
+        path.unlink()
+    except FileNotFoundError as exc:
+        raise ValueError(f"Unknown niche id: {niche_id}") from exc
+    return niche
+
+
 def split_global_count(total: int, niche_count: int) -> list[int]:
     if total < 1:
         raise ValueError("Prompt count must be at least 1.")

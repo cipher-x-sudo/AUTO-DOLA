@@ -121,6 +121,11 @@ class NicheRead(BaseModel):
     size_bytes: int
 
 
+class NicheDeleteResponse(BaseModel):
+    deleted: bool
+    niche_id: str
+
+
 class NichePromptGenerateRequest(BaseModel):
     niche_ids: list[str] = Field(min_length=1)
     count: int = Field(default=5, ge=1)
