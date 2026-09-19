@@ -7,6 +7,7 @@ from app.database import get_session
 from app.models import Job, JobKind, LogEvent
 from app.schemas import JobRead
 from app.services.dola_browser import DolaBrowserClient
+from app.services.cookie_profiles import list_profiles
 from app.services.settings import load_public_settings
 
 router = APIRouter(prefix="/api/studio", tags=["studio"])
@@ -49,5 +50,6 @@ async def studio_status(session: Session = Depends(get_session)) -> dict:
         ],
         "settings": app_settings,
         "logs": [row.model_dump() for row in logs],
+        "cookie_profiles": list_profiles(session),
         "browser": browser,
     }

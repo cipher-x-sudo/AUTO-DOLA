@@ -16,9 +16,10 @@ from sqlmodel import Session, select
 from app.database import get_session
 from app.config import settings
 from app.events import hub, job_channel
-from app.models import Artifact, ItemStatus, Job, JobItem, JobKind, JobStatus, LogEvent, utcnow
+from app.models import Artifact, DolaCookieJobSnapshot, ItemStatus, Job, JobItem, JobKind, JobStatus, LogEvent, utcnow
 from app.queue import enqueue_job, get_queue
 from app.schemas import JobRead, VideoJobCreate
+from app.services.cookie_profiles import snapshot_profiles
 from app.services.cookie_snapshots import list_cookie_snapshot_metadata, read_cookie_snapshot, redact_cookie_snapshot_payload
 from app.services.jobs import log, recompute_job
 
@@ -32,6 +33,7 @@ def safe_output_folder_name(prompt_count: int, timestamp: str) -> str:
 
 def prepare_video_job_config(payload: VideoJobCreate) -> dict:
     config = payload.model_dump()
+    config.pop("cookie_profile_ids", None)
     base_folder = Path(config.get("save_folder") or settings.output_dir)
     folder_name = safe_output_folder_name(len(payload.prompts), utcnow().strftime("%Y%m%d-%H%M%S"))
     job_output_folder = base_folder / folder_name
@@ -55,12 +57,35 @@ def create_video_job(payload: VideoJobCreate, session: Session = Depends(get_ses
     session.add(job)
     session.commit()
     session.refresh(job)
+    try:
+        snapshot_profiles(session, job.id, payload.cookie_profile_ids)
+        session.commit()
+    except ValueError as exc:
+        session.rollback()
+        session.delete(job)
+        session.commit()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     for prompt in payload.prompts:
         session.add(JobItem(job_id=job.id, prompt=prompt.prompt.strip(), title=prompt.title.strip()))
     session.commit()
     log(session, f"Queued {len(payload.prompts)} video generation item(s).", "info", job.id)
     enqueue_job(JobKind.video, job.id)
     return get_job(job.id, session)
+
+
+@router.post("/jobs/{job_id}/resume", response_model=JobRead)
+def resume_job(job_id: UUID, session: Session = Depends(get_session)) -> Job:
+    job = get_job(job_id, session)
+    if job.status != JobStatus.paused:
+        raise HTTPException(status_code=400, detail="Only paused jobs can be resumed.")
+    job.status = JobStatus.queued
+    job.error = None
+    job.updated_at = utcnow()
+    session.add(job)
+    session.commit()
+    log(session, "Manual resume requested for paused job.", "info", job.id)
+    enqueue_job(JobKind.video, job.id)
+    return get_job(job_id, session)
 
 
 @router.get("/jobs", response_model=list[JobRead])
@@ -85,6 +110,7 @@ def clear_jobs(session: Session = Depends(get_session)) -> dict[str, int]:
     session.exec(delete(Artifact).where(Artifact.job_id.in_(job_ids)))  # type: ignore[arg-type]
     session.exec(delete(JobItem).where(JobItem.job_id.in_(job_ids)))  # type: ignore[arg-type]
     session.exec(delete(LogEvent).where(LogEvent.job_id.in_(job_ids)))  # type: ignore[arg-type]
+    session.exec(delete(DolaCookieJobSnapshot).where(DolaCookieJobSnapshot.job_id.in_(job_ids)))  # type: ignore[arg-type]
     session.exec(delete(Job).where(Job.id.in_(job_ids)))  # type: ignore[arg-type]
     session.commit()
     return {"deleted": len(job_ids)}

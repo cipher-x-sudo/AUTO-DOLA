@@ -22,8 +22,6 @@ def test_public_settings_default_to_hybrid_dola_mode(monkeypatch) -> None:
 
 
 def make_session() -> Session:
-    from app.models import Setting
-
     engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
     SQLModel.metadata.create_all(engine)
     return Session(engine)

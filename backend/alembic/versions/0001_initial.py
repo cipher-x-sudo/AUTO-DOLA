@@ -2,7 +2,6 @@
 
 from alembic import op
 import sqlalchemy as sa
-import sqlmodel
 
 revision = "0001_initial"
 down_revision = None
@@ -13,7 +12,7 @@ depends_on = None
 def upgrade() -> None:
     op.create_table(
         "job",
-        sa.Column("id", sqlmodel.sql.sqltypes.GUID(), primary_key=True),
+        sa.Column("id", sa.Uuid(), primary_key=True),
         sa.Column("kind", sa.String(length=32), nullable=False),
         sa.Column("status", sa.String(length=32), nullable=False),
         sa.Column("title", sa.String(length=200), nullable=False),
@@ -27,22 +26,22 @@ def upgrade() -> None:
     )
     op.create_table(
         "jobitem",
-        sa.Column("id", sqlmodel.sql.sqltypes.GUID(), primary_key=True),
-        sa.Column("job_id", sqlmodel.sql.sqltypes.GUID(), sa.ForeignKey("job.id"), nullable=False),
+        sa.Column("id", sa.Uuid(), primary_key=True),
+        sa.Column("job_id", sa.Uuid(), sa.ForeignKey("job.id"), nullable=False),
         sa.Column("prompt", sa.Text(), nullable=False),
         sa.Column("title", sa.String(length=240), nullable=False),
         sa.Column("status", sa.String(length=32), nullable=False),
         sa.Column("action", sa.String(length=240), nullable=False),
         sa.Column("error", sa.Text(), nullable=True),
-        sa.Column("artifact_id", sqlmodel.sql.sqltypes.GUID(), nullable=True),
+        sa.Column("artifact_id", sa.Uuid(), nullable=True),
         sa.Column("created_at", sa.DateTime(), nullable=False),
         sa.Column("updated_at", sa.DateTime(), nullable=False),
     )
     op.create_table(
         "artifact",
-        sa.Column("id", sqlmodel.sql.sqltypes.GUID(), primary_key=True),
-        sa.Column("job_id", sqlmodel.sql.sqltypes.GUID(), sa.ForeignKey("job.id"), nullable=False),
-        sa.Column("item_id", sqlmodel.sql.sqltypes.GUID(), nullable=True),
+        sa.Column("id", sa.Uuid(), primary_key=True),
+        sa.Column("job_id", sa.Uuid(), sa.ForeignKey("job.id"), nullable=False),
+        sa.Column("item_id", sa.Uuid(), nullable=True),
         sa.Column("kind", sa.String(length=32), nullable=False),
         sa.Column("path", sa.Text(), nullable=False),
         sa.Column("filename", sa.String(length=260), nullable=False),
@@ -52,8 +51,8 @@ def upgrade() -> None:
     )
     op.create_table(
         "logevent",
-        sa.Column("id", sqlmodel.sql.sqltypes.GUID(), primary_key=True),
-        sa.Column("job_id", sqlmodel.sql.sqltypes.GUID(), nullable=True),
+        sa.Column("id", sa.Uuid(), primary_key=True),
+        sa.Column("job_id", sa.Uuid(), nullable=True),
         sa.Column("level", sa.String(length=20), nullable=False),
         sa.Column("message", sa.Text(), nullable=False),
         sa.Column("created_at", sa.DateTime(), nullable=False),

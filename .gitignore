@@ -30,3 +30,7 @@ extracted/
 server_reextract/
 server.exe_extracted/
 server.exe_extracted_ng/
+dola_testing/input/
+dola_testing/output/
+dola_testing/_extracted/
+dola_testing/*.har

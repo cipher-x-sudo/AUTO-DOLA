@@ -1,3 +1,6 @@
+import json
+from urllib.parse import parse_qs, urlparse
+
 import pytest
 
 import app.services.dola_browser as dola_browser
@@ -9,7 +12,9 @@ from app.services.dola_browser import (
     DolaBrowserClient,
     DolaBrowserSubmitResult,
     build_browser_video_prompt_text,
+    build_generation_patch_script,
     extract_duration_and_ratio_from_post_data,
+    extract_generation_options_from_post_data,
     conversation_id_from_url,
     fp_from_url_or_cookies,
     has_auth_cookie,
@@ -184,14 +189,88 @@ def test_build_browser_video_prompt_text_uses_simple_prefix_for_all_settings() -
     assert build_browser_video_prompt_text("Generate video: cinematic city", 10, "9:16") == "Generate video: cinematic city"
 
 
-def test_duration_patch_script_rewrites_five_or_ten_to_fifteen() -> None:
+def test_generation_patch_script_rewrites_duration_and_model() -> None:
     assert "JSON.stringify" in DURATION_PATCH_SCRIPT
-    assert '"duration":15' in DURATION_PATCH_SCRIPT
-    assert "(10|5)" in DURATION_PATCH_SCRIPT
+    assert "targetDuration" in DURATION_PATCH_SCRIPT
+    assert "targetModel" in DURATION_PATCH_SCRIPT
+    script = build_generation_patch_script(60, "seedance_v2.5")
+    assert "const targetDuration = 60" in script
+    assert 'const targetModel = "seedance_v2.5"' in script
+
+
+def test_browser_cookie_injection_keeps_fresh_ttwid_precedence() -> None:
+    cookies, skipped = DolaBrowserClient._browser_auth_cookies(
+        [
+            {"name": "sessionid", "value": "secret", "domain": ".dola.com", "path": "/"},
+            {"name": "ttwid", "value": "stale-public", "domain": ".dola.com", "path": "/"},
+            {"name": "s_v_web_id", "value": "stale-browser-id", "domain": ".dola.com", "path": "/"},
+            {"name": "store-idc", "value": "stale-routing", "domain": ".dola.com", "path": "/"},
+            {"name": "_ga_5MR93B9JT5", "value": "stale-analytics", "domain": ".dola.com", "path": "/"},
+        ]
+    )
+
+    assert [cookie["name"] for cookie in cookies] == ["sessionid"]
+    assert skipped == 4
 
 
 def test_extract_duration_and_ratio_from_post_data() -> None:
     assert extract_duration_and_ratio_from_post_data('{"chat_ability":{"ability_param":"{\\"duration\\":15,\\"ratio\\":\\"9:16\\"}"}}') == (15, "9:16")
+    assert extract_generation_options_from_post_data('{"chat_ability":{"ability_param":"{\\"model\\":\\"seedance_v2.5\\",\\"duration\\":60,\\"ratio\\":\\"16:9\\"}"}}') == ("seedance_v2.5", 60, "16:9")
+    assert extract_generation_options_from_post_data(
+        "%7B%22video_model%22%3A%22seedance_v2.5%22%2C%22video_duration%22%3A30%2C%22aspect_ratio%22%3A%221%3A1%22%7D"
+    ) == ("seedance_v2.5", 30, "1:1")
+
+
+@pytest.mark.asyncio
+async def test_browser_response_resolves_fallback_api_before_dom_video() -> None:
+    raw_url = "https://cdn.example/raw-browser.mp4?token=secret"
+
+    class FakePage:
+        url = "https://www.dola.com/chat/conversation"
+
+        def __init__(self) -> None:
+            self.requested_url = ""
+
+        async def evaluate(self, _script: str, url: str) -> dict[str, object]:
+            self.requested_url = url
+            return {"video_info": {"data": {"main_url": raw_url}}}
+
+    page = FakePage()
+
+    class FakeFrame:
+        pass
+
+    frame = FakeFrame()
+    frame.page = page
+
+    class FakeRequest:
+        pass
+
+    request = FakeRequest()
+    request.frame = frame
+
+    class FakeResponse:
+        url = "https://www.dola.com/im/chain/single"
+        status = 200
+
+        async def text(self) -> str:
+            return json.dumps({"code": 0, "data": {"creation": {"fallback_api": "https://video.example/play?logo_type=watermarked"}}})
+
+    response = FakeResponse()
+    response.request = request
+    network = BrowserNetworkState()
+    client = DolaBrowserClient()
+
+    await client._capture_response(response, network)
+
+    assert network.unwatermarked_url == raw_url
+    query = parse_qs(urlparse(page.requested_url).query)
+    assert query["logo_type"] == ["unwatermarked"]
+    assert query["codec_type"] == ["8"]
+    assert query["channel"] == ["no"]
+    diagnostic = client._diagnostic(page, network)  # type: ignore[arg-type]
+    assert diagnostic["has_unwatermarked_url"] is True
+    assert raw_url not in json.dumps(diagnostic)
 
 
 def test_browser_diagnostic_formatter_omits_empty_fields() -> None:
@@ -271,6 +350,69 @@ async def test_page_ready_waits_for_video_tab_instead_of_failing_on_skeleton(mon
 
 
 @pytest.mark.asyncio
+async def test_authenticated_page_readiness_does_not_reload_slow_hydration(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeVideoTab:
+        def __init__(self) -> None:
+            self.checks = 0
+
+        async def count(self) -> int:
+            self.checks += 1
+            return 1 if self.checks >= 2 else 0
+
+        def nth(self, _index: int) -> "FakeVideoTab":
+            return self
+
+        async def is_visible(self) -> bool:
+            return True
+
+    class FakePage:
+        url = "https://www.dola.com/chat/create-image"
+
+        def __init__(self) -> None:
+            self.video_tab = FakeVideoTab()
+
+        def get_by_role(self, _role: str, **_kwargs: object) -> FakeVideoTab:
+            return self.video_tab
+
+        async def reload(self, **_kwargs: object) -> None:
+            raise AssertionError("authenticated page hydration must not be reloaded")
+
+    client = DolaBrowserClient()
+    page = FakePage()
+    network = BrowserNetworkState(auth_cookie_count=29)
+    ticks = iter((0.0, 0.0, 0.0, 16.0, 16.5))
+
+    class FakeTime:
+        @staticmethod
+        def monotonic() -> float:
+            return next(ticks, 16.5)
+
+    async def no_block(_page: object, _network: BrowserNetworkState) -> None:
+        return None
+
+    async def visible(_page: object) -> list[str]:
+        return ["loading_skeleton"]
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    async def no_dismiss(*_args: object, **_kwargs: object) -> bool:
+        return False
+
+    monkeypatch.setattr(client, "_raise_if_blocked", no_block)
+    monkeypatch.setattr(client, "_visible_dola_elements", visible)
+    monkeypatch.setattr(client, "_dismiss_cookie_banner", no_dismiss)
+    monkeypatch.setattr(client, "_dismiss_login_popup", no_dismiss)
+    monkeypatch.setattr(dola_browser.asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(dola_browser, "time", FakeTime())
+
+    await client._ensure_dola_ready(page, network)  # type: ignore[arg-type]
+
+    assert network.last_successful_stage == "page_ready"
+    assert network.timeout_seconds == dola_browser.AUTHENTICATED_PAGE_TIMEOUT_SECONDS
+
+
+@pytest.mark.asyncio
 async def test_submit_button_waits_until_candidate_is_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
     class FakeButton:
         def __init__(self) -> None:
@@ -312,9 +454,6 @@ async def test_submit_candidate_uses_stable_send_wrapper() -> None:
     class FakeButton:
         async def count(self) -> int:
             return 1
-
-        def nth(self, _index: int) -> "FakeLocator":
-            return self
 
         def nth(self, _index: int) -> "FakeButton":
             return self
@@ -659,7 +798,7 @@ async def test_uncloseable_login_popup_fails_after_three_attempts(monkeypatch: p
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("ratio", ["9:16", "16:9", "1:1"])
-@pytest.mark.parametrize(("duration", "ui_duration"), [(5, 5), (10, 10), (15, 10)])
+@pytest.mark.parametrize(("duration", "ui_duration"), [(5, 5), (10, 10), (15, 10), (30, 10), (60, 10)])
 async def test_generation_options_select_exact_ratio_and_duration(
     monkeypatch: pytest.MonkeyPatch,
     ratio: str,
@@ -713,7 +852,92 @@ async def test_captured_generation_option_mismatch_fails_before_session_build(mo
         await client._wait_for_submit_capture(object(), FakePage(), network)  # type: ignore[arg-type]
 
     assert exc_info.value.error_type == "GENERATION_OPTIONS_MISMATCH"
-    assert "requested 15s 9:16, captured 10s 9:16" in str(exc_info.value)
+    assert "requested unknown 15s 9:16, captured unknown 10s 9:16" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("duration", "duration_patch_expected", "duration_patch_applied"),
+    [(10, False, False), (30, True, True), (60, True, True)],
+)
+async def test_opaque_submitted_payload_uses_verified_ui_and_patch_state(
+    monkeypatch: pytest.MonkeyPatch,
+    duration: int,
+    duration_patch_expected: bool,
+    duration_patch_applied: bool,
+) -> None:
+    client = DolaBrowserClient()
+    network = BrowserNetworkState(
+        conversation_id="123456789",
+        captured_url="https://www.dola.com/chat/completion",
+        requested_model="seedance_v2.5",
+        requested_duration=duration,
+        requested_ratio="9:16",
+        selected_model="seedance_v2.5",
+        selected_duration=10 if duration_patch_expected else duration,
+        selected_ratio="9:16",
+        duration_patch_expected=duration_patch_expected,
+        model_patch_expected=True,
+    )
+
+    class FakePage:
+        url = "https://www.dola.com/chat/123456789"
+
+        async def evaluate(self, _script: str) -> dict[str, bool]:
+            return {"duration": duration_patch_applied, "model": False}
+
+    async def build_session(_context: object, _network: BrowserNetworkState) -> DolaSession:
+        return DolaSession(
+            url="https://www.dola.com/chat/completion",
+            headers={},
+            payload_template={},
+            fp="fp",
+            has_ttwid=True,
+            has_hook_slardar=True,
+            has_auth_cookies=True,
+        )
+
+    monkeypatch.setattr(client, "_build_dola_session_from_browser", build_session)
+
+    result = await client._wait_for_submit_capture(object(), FakePage(), network)  # type: ignore[arg-type]
+
+    assert result.conversation_id == "123456789"
+    assert "selected UI control" in network.generation_options_verification
+    if duration_patch_expected:
+        assert "via request patch" in network.generation_options_verification
+
+
+@pytest.mark.asyncio
+async def test_opaque_long_duration_fails_when_request_patch_was_not_applied(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = DolaBrowserClient()
+    network = BrowserNetworkState(
+        conversation_id="123456789",
+        captured_url="https://www.dola.com/chat/completion",
+        requested_model="seedance_v2.5",
+        requested_duration=30,
+        requested_ratio="9:16",
+        selected_model="seedance_v2.5",
+        selected_duration=10,
+        selected_ratio="9:16",
+        duration_patch_expected=True,
+    )
+
+    class FakePage:
+        url = "https://www.dola.com/chat/123456789"
+
+        async def evaluate(self, _script: str) -> dict[str, bool]:
+            return {"duration": False, "model": False}
+
+    async def no_screenshot(_page: object, _name: str) -> str:
+        return ""
+
+    monkeypatch.setattr(client, "_screenshot", no_screenshot)
+
+    with pytest.raises(DolaBrowserError) as exc_info:
+        await client._wait_for_submit_capture(object(), FakePage(), network)  # type: ignore[arg-type]
+
+    assert exc_info.value.error_type == "GENERATION_OPTIONS_MISMATCH"
+    assert "unverified request patch" in str(exc_info.value)
 
 
 @pytest.mark.asyncio

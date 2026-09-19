@@ -1,16 +1,20 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
+import inspect
 import json
 import re
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, parse_qsl, urlencode, urlparse, urlunparse
 
 from curl_cffi import requests as curl_requests
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 
 AUTH_COOKIE_PATHS = (
@@ -30,6 +34,12 @@ VIDEO_POLL_ATTEMPTS = 250
 VIDEO_POLL_INTERVAL_SECONDS = 5
 PLAY_INFO_POLL_ATTEMPTS = 200
 PLAY_INFO_POLL_INTERVAL_SECONDS = 5
+QAAB_SALT = bytes.fromhex(
+    "4dd4c2e6b83162090e52b3c7a6733ba4"
+    "1cb2462b829ab58a196b39db57177524"
+    "f49baf7f08e8d68d26a72e37c1a95a2f"
+    "1f05a51892aef2949732b62a38aadd58"
+)
 VIDEO_FAILURE_MARKERS = (
     "failed to generate",
     "generation failed",
@@ -69,6 +79,8 @@ class DolaSession:
     has_ttwid: bool
     has_hook_slardar: bool
     has_auth_cookies: bool
+    unwatermarked_url: str = ""
+    seen_fallback_apis: set[str] = field(default_factory=set)
 
 
 @dataclass
@@ -127,9 +139,10 @@ class DolaClient:
         public_cookies = await self._fetch_public_cookies()
         if not public_cookies.get("ttwid"):
             raise RuntimeError("Public Dola session failed: no ttwid cookie.")
-        auth_cookies: dict[str, str] = {}
+        auth_cookies = read_auth_cookies(self.auth_cookies)
         merged_cookies = merge_cookies(
             {"i18next": "en", "flow_user_country": self.region, "s_v_web_id": fp},
+            auth_cookies,
             public_cookies,
         )
         headers = {
@@ -202,6 +215,7 @@ class DolaClient:
         log_fn: Callable[[str, str], None] | None = None,
         raw_response_fn: Callable[[str, int, int, str], None] | None = None,
         cancel_fn: Callable[[], bool] | None = None,
+        assistant_message_fn: Callable[[str], Any] | None = None,
     ) -> str | None:
         url = session.url.replace("chat/completion", "im/chain/single")
         headers = {k: v for k, v in session.headers.items() if k.lower() not in {"content-type", "accept-encoding", "agw-js-conv"}}
@@ -222,20 +236,36 @@ class DolaClient:
                 raw_response_fn("chain_poll", attempt, response.status_code, response.text)
             if response.status_code == 200:
                 payload = response.json()
+                await self._capture_unwatermarked_url(session, payload, response.text, log_fn=log_fn)
                 vid, _ = parse_vid_with_diagnostics(payload)
                 if vid:
                     if log_fn:
                         log_fn("Dola returned video id.", "success")
                     return vid
 
+                replacement_conversation: tuple[str, int] | None = None
                 for message in extract_chain_texts(payload):
                     if message not in seen_messages:
                         seen_messages.add(message)
                         if log_fn:
                             level = "warn" if is_terminal_video_failure(message) else "info"
                             log_fn(message[:500], level)
+                        if assistant_message_fn:
+                            replacement = assistant_message_fn(message)
+                            if inspect.isawaitable(replacement):
+                                replacement = await replacement
+                            if replacement:
+                                replacement_conversation = replacement
+                                break
                     if is_terminal_video_failure(message):
                         raise DolaTerminalGenerationError(f"Dola rejected this prompt: {message[:500]}")
+                if replacement_conversation:
+                    conversation_id, conversation_type = replacement_conversation
+                    body = build_chain_poll_body(conversation_id, conversation_type)
+                    seen_messages.clear()
+                    # Poll the replacement request immediately; it is the
+                    # automatic confirmation/retry for unsupported duration.
+                    continue
             elif log_fn and attempt == 1:
                 log_fn(f"Dola chain poll returned HTTP {response.status_code}.", "warn")
             await asyncio.sleep(sleep_seconds)
@@ -252,6 +282,10 @@ class DolaClient:
         max_attempts: int = PLAY_INFO_POLL_ATTEMPTS,
         sleep_seconds: float = PLAY_INFO_POLL_INTERVAL_SECONDS,
     ) -> str | None:
+        if session.unwatermarked_url:
+            if log_fn:
+                log_fn("Using raw unwatermarked Dola source from fallback_api.", "success")
+            return session.unwatermarked_url
         url = session.url.replace("chat/completion", "samantha/video/get_play_info")
         headers = {k: v for k, v in session.headers.items() if k.lower() not in {"content-type", "accept-encoding"}}
         headers["content-type"] = "application/json"
@@ -266,7 +300,9 @@ class DolaClient:
             if raw_response_fn:
                 raw_response_fn("play_info", attempt, response.status_code, response.text)
             if response.status_code == 200:
-                download_url = parse_play_info(response.json())
+                payload = response.json()
+                await self._capture_unwatermarked_url(session, payload, response.text, log_fn=log_fn)
+                download_url = session.unwatermarked_url or parse_play_info(payload)
                 if download_url:
                     return download_url
             for _ in range(max(1, int(sleep_seconds / 0.5))):
@@ -276,6 +312,46 @@ class DolaClient:
                     return None
                 await asyncio.sleep(0.5)
         return None
+
+    async def _capture_unwatermarked_url(
+        self,
+        session: DolaSession,
+        payload: Any,
+        raw_body: str = "",
+        *,
+        log_fn: Callable[[str, str], None] | None = None,
+    ) -> str:
+        for fallback_api in find_dola_fallback_apis(payload, raw_body):
+            if fallback_api in session.seen_fallback_apis:
+                continue
+            session.seen_fallback_apis.add(fallback_api)
+            if log_fn:
+                log_fn("Found Dola fallback_api; requesting raw unwatermarked source.", "info")
+            try:
+                api_url = build_unwatermarked_fallback_url(fallback_api)
+                response = await self._session().get(
+                    api_url,
+                    headers={
+                        "accept": "application/json,text/plain,*/*",
+                        "cookie": "",
+                        "user-agent": ANDROID_WEBVIEW_UA,
+                    },
+                    timeout=self.timeout,
+                )
+                if response.status_code != 200:
+                    if log_fn:
+                        log_fn(f"Unwatermarked fallback returned HTTP {response.status_code}; using normal play_info fallback.", "warn")
+                    continue
+                raw_url = parse_unwatermarked_video_url(response.json())
+                if raw_url:
+                    session.unwatermarked_url = raw_url
+                    if log_fn:
+                        log_fn("Resolved raw unwatermarked Dola video source.", "success")
+                    return raw_url
+            except Exception as exc:
+                if log_fn:
+                    log_fn(f"Unwatermarked fallback could not be resolved ({type(exc).__name__}); using normal play_info fallback.", "warn")
+        return ""
 
 
 def parse_submit_response(session: DolaSession, payload: dict[str, Any], response: Any) -> DolaSubmitResult:
@@ -425,6 +501,9 @@ def parse_cookie_text(text: str) -> dict[str, str]:
 
 
 def read_auth_cookies(settings_cookies: str = "", paths: tuple[Path, ...] = AUTH_COOKIE_PATHS) -> dict[str, str]:
+    configured = parse_cookie_text(settings_cookies)
+    if configured:
+        return configured
     for path in paths:
         try:
             if path.exists() and path.is_file():
@@ -554,17 +633,24 @@ async def dola_session_status(auth_cookies: str = "", region: str = "BD") -> dic
         return {"ok": False, "has_ttwid": False, "has_auth_cookies": False, "region": region, "error": str(exc)}
 
 
-def build_dola_payload(template: dict[str, Any], prompt: str, duration: int, ratio: str) -> dict[str, Any]:
+def build_dola_payload(
+    template: dict[str, Any],
+    prompt: str,
+    duration: int,
+    ratio: str,
+    model: str = "seedance_v2.0",
+) -> dict[str, Any]:
     payload = json.loads(json.dumps(template))
     duration = int(duration)
     ratio = str(ratio or "9:16")
+    model = normalize_video_model(model)
     payload["messages"][0]["local_message_id"] = str(uuid.uuid4())
     payload["messages"][0]["content_block"][0]["block_id"] = str(uuid.uuid4())
     payload["messages"][0]["content_block"][0]["content"]["text_block"]["text"] = build_video_prompt_text(prompt, duration, ratio)
     payload["option"]["unique_key"] = str(uuid.uuid4())
     payload["option"]["create_time_ms"] = int(time.time() * 1000)
     payload["option"]["recovery_option"]["req_create_time_sec"] = int(time.time())
-    payload["chat_ability"] = {"ability_type": 17, "ability_param": json.dumps({"model": "seedance_v2.0", "duration": duration, "ratio": ratio}, separators=(",", ":"))}
+    payload["chat_ability"] = {"ability_type": 17, "ability_param": json.dumps({"model": model, "duration": duration, "ratio": ratio}, separators=(",", ":"))}
     payload["client_meta"]["conversation_id"] = ""
     payload["client_meta"]["last_section_id"] = ""
     payload["client_meta"]["last_message_index"] = None
@@ -573,6 +659,19 @@ def build_dola_payload(template: dict[str, Any], prompt: str, duration: int, rat
     payload["option"]["conversation_init_option"] = {"need_ack_conversation": True}
     payload["ext"]["conversation_init_option"] = '{"need_ack_conversation":true}'
     return payload
+
+
+def normalize_video_model(model: str) -> str:
+    normalized = str(model or "seedance_v2.0").strip().lower().replace(" ", "_")
+    aliases = {
+        "seedance_2.0": "seedance_v2.0",
+        "seedance_2.5": "seedance_v2.5",
+        "seedance_v2": "seedance_v2.0",
+    }
+    normalized = aliases.get(normalized, normalized)
+    if normalized not in {"seedance_v2.0", "seedance_v2.5"}:
+        raise ValueError(f"Unsupported Dola video model: {model}.")
+    return normalized
 
 
 def build_video_prompt_text(prompt: str, duration: int, ratio: str) -> str:
@@ -687,6 +786,24 @@ def is_assistant_log_message(text: str) -> bool:
         "bearer ",
     )
     return not any(fragment in lowered for fragment in blocked_fragments)
+
+
+def suggested_video_duration_from_message(message: str, requested_duration: int) -> int | None:
+    """Return Dola's suggested duration when it asks to downgrade a request."""
+    if int(requested_duration) <= 15:
+        return None
+    lowered = str(message or "").lower()
+    if "supports duration" not in lowered or "nearest supported duration" not in lowered:
+        return None
+    nearest = re.search(r"nearest supported duration\s*(?:of)?\s*(\d+)\s*seconds?", lowered)
+    if nearest:
+        value = int(nearest.group(1))
+        return value if 1 <= value <= 15 else None
+    supported = re.search(r"supports durations?\s+from\s+(\d+)\s+to\s+(\d+)\s*seconds?", lowered)
+    if supported:
+        value = int(supported.group(2))
+        return value if 1 <= value <= 15 else None
+    return None
 
 
 def parse_vid(payload: dict[str, Any]) -> str | None:
@@ -821,6 +938,234 @@ def _extract_text_values(value: Any) -> list[str]:
 def is_terminal_video_failure(text: str) -> bool:
     lowered = text.lower().replace("’", "'")
     return any(marker in lowered for marker in VIDEO_FAILURE_MARKERS)
+
+
+def find_dola_fallback_apis(payload: Any, raw_body: str = "") -> list[str]:
+    """Return unique fallback_api URLs without exposing them to diagnostics."""
+    found: list[str] = []
+    seen: set[str] = set()
+
+    def add(value: Any) -> None:
+        if not isinstance(value, str) or not value.strip():
+            return
+        decoded = decode_json_escaped_fragment(value.strip())
+        if is_http_url(decoded) and decoded not in seen:
+            seen.add(decoded)
+            found.append(decoded)
+
+    def walk(value: Any, depth: int = 0) -> None:
+        if depth > 12:
+            return
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if key == "fallback_api":
+                    add(child)
+                walk(child, depth + 1)
+        elif isinstance(value, list):
+            for child in value:
+                walk(child, depth + 1)
+        elif isinstance(value, str) and "fallback_api" in value:
+            scan_text(value)
+            stripped = value.strip()
+            if stripped.startswith(("{", "[")):
+                try:
+                    walk(json.loads(stripped), depth + 1)
+                except json.JSONDecodeError:
+                    pass
+
+    def scan_text(text: str) -> None:
+        patterns = (
+            r'fallback_api\\":\\"(.*?)\\"',
+            r'"fallback_api"\s*:\s*"((?:\\.|[^"\\])*)"',
+        )
+        for pattern in patterns:
+            for match in re.finditer(pattern, text):
+                add(match.group(1))
+
+    walk(payload)
+    if raw_body:
+        scan_text(raw_body)
+    return found
+
+
+def decode_json_escaped_fragment(value: str) -> str:
+    text = str(value)
+    for _ in range(3):
+        try:
+            decoded = json.loads('"' + text.replace('"', '\\"') + '"')
+        except (json.JSONDecodeError, TypeError):
+            break
+        if decoded == text or not isinstance(decoded, str):
+            break
+        text = decoded
+    return text.replace("\\u0026", "&").replace("\\/", "/")
+
+
+def is_http_url(value: str) -> bool:
+    parsed = urlparse(str(value or "").strip())
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def build_unwatermarked_fallback_url(fallback_api: str) -> str:
+    parsed = urlparse(decode_json_escaped_fragment(fallback_api))
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("Dola fallback_api is not an HTTP URL.")
+    replacements = {"channel": "no", "codec_type": "8", "logo_type": "unwatermarked"}
+    query = [(key, value) for key, value in parse_qsl(parsed.query, keep_blank_values=True) if key not in replacements]
+    query.extend(replacements.items())
+    return urlunparse(parsed._replace(query=urlencode(query)))
+
+
+def parse_unwatermarked_video_url(payload: Any) -> str | None:
+    data = _fallback_video_data(payload)
+    picked = _pick_fallback_main_url(data)
+    if not picked:
+        return None
+    return decode_dola_main_url(picked, _find_key_seed(payload)) or None
+
+
+def _fallback_video_data(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    video_info = payload.get("video_info") or _get_path(payload, ("data", "video_info")) or payload
+    if not isinstance(video_info, dict):
+        return {}
+    data = video_info.get("data") or video_info
+    return data if isinstance(data, dict) else {}
+
+
+def _pick_fallback_main_url(data: dict[str, Any]) -> str:
+    video_list = data.get("video_list")
+    entries = list(video_list.values()) if isinstance(video_list, dict) and video_list else [data]
+    best_token = ""
+    best_score = (-1, -1, -1)
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        token = entry.get("main_url") or entry.get("play_url") or ""
+        if not isinstance(token, str) or not token.strip():
+            continue
+        width = _number(entry.get("vwidth") or entry.get("width"))
+        height = _number(entry.get("vheight") or entry.get("height"))
+        bitrate = _number(entry.get("bitrate") or entry.get("real_bitrate"))
+        file_size = max(
+            (_number(entry.get(key)) for key in ("expectedBytes", "file_size", "fileSize", "filesize", "content_length", "contentLength", "video_size", "videoSize")),
+            default=0,
+        )
+        score = (width * height, bitrate, file_size)
+        if score > best_score:
+            best_token = token.strip()
+            best_score = score
+    return best_token
+
+
+def _number(value: Any) -> int:
+    try:
+        return int(float(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _find_key_seed(value: Any, depth: int = 0) -> str:
+    if depth > 12:
+        return ""
+    if isinstance(value, dict):
+        seed = value.get("key_seed")
+        if isinstance(seed, str) and seed.strip():
+            return seed.strip()
+        for child in value.values():
+            hit = _find_key_seed(child, depth + 1)
+            if hit:
+                return hit
+    elif isinstance(value, list):
+        for child in value:
+            hit = _find_key_seed(child, depth + 1)
+            if hit:
+                return hit
+    return ""
+
+
+def decode_dola_main_url(token: str, key_seed: str = "") -> str:
+    if is_http_url(token):
+        return token
+    plain = _ascii_url_from_bytes(_base64_decode_loose(token))
+    if is_http_url(plain):
+        return plain
+    if token.startswith("qAAB") and key_seed:
+        return _decode_qaab_token(token, key_seed)
+    return ""
+
+
+def _base64_decode_loose(value: str) -> bytes:
+    text = str(value or "").strip()
+    variants = (
+        text,
+        text.translate(str.maketrans({"$": "_", "@": "/", "#": "."})),
+        text.translate(str.maketrans({"$": "+", "@": "/", "#": "="})),
+    )
+    for candidate in dict.fromkeys(variants):
+        if not candidate:
+            continue
+        normalized = candidate.replace("-", "+").replace("_", "/")
+        normalized += "=" * ((4 - len(normalized) % 4) % 4)
+        try:
+            return base64.b64decode(normalized, validate=True)
+        except (ValueError, base64.binascii.Error):
+            continue
+    return b""
+
+
+def _ascii_url_from_bytes(value: bytes) -> str:
+    if not value:
+        return ""
+    if any(byte not in {9, 10, 13} and (byte < 32 or byte > 126) for byte in value):
+        return ""
+    try:
+        return value.decode("utf-8")
+    except UnicodeDecodeError:
+        return ""
+
+
+def _decode_qaab_token(token: str, key_seed: str) -> str:
+    data = _base64_decode_loose(token)
+    seed = _base64_decode_loose(key_seed)
+    if not data or not seed:
+        return ""
+    digest1 = hashlib.sha512(seed[:32]).digest()
+    digest2 = hashlib.sha512(digest1 + QAAB_SALT).digest()
+    key = digest2[:16]
+    iv = digest2[16:32]
+    attempts: list[tuple[bytes, bytes, bytes]] = []
+    if data.startswith(b"\xa8\x00\x01\x00"):
+        attempts.extend(((data[4:], key, iv), (data[4:], iv, key)))
+        if len(data) > 36:
+            attempts.extend(((data[36:], key, data[20:36]), (data[36:], key, iv)))
+    else:
+        attempts.append((data, key, iv))
+    for encrypted, attempt_key, attempt_iv in attempts:
+        url = _decrypt_aes_cbc_url(encrypted, attempt_key, attempt_iv)
+        if url:
+            return url
+    return ""
+
+
+def _decrypt_aes_cbc_url(payload: bytes, key: bytes, iv: bytes) -> str:
+    if not payload or len(payload) % 16:
+        return ""
+    try:
+        decryptor = Cipher(algorithms.AES(key), modes.CBC(iv)).decryptor()
+        plain = decryptor.update(payload) + decryptor.finalize()
+    except ValueError:
+        return ""
+    direct = _ascii_url_from_bytes(plain)
+    if is_http_url(direct):
+        return direct
+    if plain:
+        pad = plain[-1]
+        if 1 <= pad <= 16 and pad <= len(plain) and plain[-pad:] == bytes([pad]) * pad:
+            plain = plain[:-pad]
+    url = _ascii_url_from_bytes(plain)
+    return url if is_http_url(url) else ""
 
 
 def parse_play_info(payload: dict[str, Any]) -> str | None:

@@ -12,11 +12,15 @@ class PromptItem(BaseModel):
 
 class VideoJobCreate(BaseModel):
     prompts: list[PromptItem] = Field(min_length=1)
+    cookie_profile_ids: list[UUID] = Field(default_factory=list)
+    model: Literal["seedance_v2.0", "seedance_v2.5"] = "seedance_v2.0"
     ratio: str = "9:16"
-    duration: Literal[5, 10, 15] = 10
+    duration: Literal[5, 10, 15, 30, 60] = 10
     save_folder: str = ""
     parallel: int = Field(default=5, ge=1)
-    clean_watermark: bool = True
+    # Dola's raw fallback source is already unwatermarked. Keep FFmpeg cleanup
+    # opt-in for older/normal sources where a watermark is still present.
+    clean_watermark: bool = False
     save_mode: str = "final"
 
 
@@ -93,6 +97,12 @@ class SettingsPayload(BaseModel):
     dola_mode: Literal["direct", "browser", "hybrid"] = "hybrid"
 
 
+class CookieProfileUpdate(BaseModel):
+    name: str | None = None
+    daily_limit: int | None = Field(default=None, ge=1, le=10000)
+    enabled: bool | None = None
+
+
 class ProxyTestRequest(BaseModel):
     proxy_url: str
 
@@ -104,7 +114,7 @@ class VpnTestRequest(BaseModel):
 class PromptGenerateRequest(BaseModel):
     master_prompt: str = Field(min_length=1)
     count: int = Field(default=5, ge=1)
-    duration: Literal[5, 10, 15] = 10
+    duration: Literal[5, 10, 15, 30, 60] = 10
     ratio: str = "9:16"
     style: str = "cinematic realistic"
 
@@ -130,7 +140,7 @@ class NichePromptGenerateRequest(BaseModel):
     niche_ids: list[str] = Field(min_length=1)
     count: int = Field(default=5, ge=1)
     count_mode: str = "global"
-    duration: Literal[5, 10, 15] = 10
+    duration: Literal[5, 10, 15, 30, 60] = 10
     style: str = "cinematic realistic"
     existing_prompts: list[str] = []
     save: bool = True

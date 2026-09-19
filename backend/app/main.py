@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.database import init_db
-from app.routers import artifacts, health, images, jobs, niches, prompts, settings_router, studio, system, tts
+from app.routers import artifacts, cookie_profiles, health, images, jobs, niches, prompts, settings_router, studio, system, tts
 
 app = FastAPI(title=settings.app_name, version="0.1.0")
 app.add_middleware(
@@ -26,6 +26,7 @@ app.include_router(settings_router.router)
 app.include_router(system.router)
 app.include_router(studio.router)
 app.include_router(jobs.router)
+app.include_router(cookie_profiles.router)
 app.include_router(niches.router)
 app.include_router(prompts.router)
 app.include_router(images.router)

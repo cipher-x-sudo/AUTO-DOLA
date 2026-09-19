@@ -1,0 +1,4 @@
+# Required: c_user and xs. Recommended: datr, fr.
+# sb is minted automatically on the first Facebook HTTP visit.
+# Example:
+# c_user=YOUR_ID; xs=YOUR_XS; fr=YOUR_FR; datr=YOUR_DATR

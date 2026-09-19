@@ -1,4 +1,4 @@
-import type { DolaBrowserStatus, Job, Niche, NichePromptGroup, SettingsPayload } from "./types"
+import type { CookieProfile, DolaBrowserStatus, Job, Niche, NichePromptGroup, SettingsPayload } from "./types"
 
 export const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:8000"
 
@@ -50,6 +50,33 @@ export const api = {
     })
   },
   deleteVpnConfig: (name: string) => request<{ ok: boolean; deleted: boolean }>(`/api/vpn/configs/${encodeURIComponent(name)}`, { method: "DELETE" }),
+  cookieProfiles: () => request<CookieProfile[]>("/api/dola-cookie-profiles"),
+  importCookieProfile: (file: File | undefined, name: string, dailyLimit: number, cookiesJson?: string) => {
+    const form = new FormData()
+    if (file) form.append("file", file)
+    if (cookiesJson?.trim()) form.append("cookies_json", cookiesJson)
+    form.append("name", name)
+    form.append("daily_limit", String(dailyLimit))
+    return fetch(`${API_BASE}/api/dola-cookie-profiles/import`, { method: "POST", body: form }).then(async (res) => {
+      if (!res.ok) throw new Error(await res.text())
+      return res.json() as Promise<CookieProfile>
+    })
+  },
+  updateCookieProfile: (id: string, payload: { name?: string; daily_limit?: number; enabled?: boolean }) =>
+    request<CookieProfile>(`/api/dola-cookie-profiles/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify(payload) }),
+  replaceCookieProfile: (id: string, file: File | undefined, name?: string, dailyLimit?: number, cookiesJson?: string) => {
+    const form = new FormData()
+    if (file) form.append("file", file)
+    if (cookiesJson?.trim()) form.append("cookies_json", cookiesJson)
+    if (name) form.append("name", name)
+    if (dailyLimit) form.append("daily_limit", String(dailyLimit))
+    return fetch(`${API_BASE}/api/dola-cookie-profiles/${encodeURIComponent(id)}/replace`, { method: "POST", body: form }).then(async (res) => {
+      if (!res.ok) throw new Error(await res.text())
+      return res.json() as Promise<CookieProfile>
+    })
+  },
+  testCookieProfile: (id: string) => request<CookieProfile>(`/api/dola-cookie-profiles/${encodeURIComponent(id)}/test`, { method: "POST" }),
+  deleteCookieProfile: (id: string) => request<{ deleted: boolean }>(`/api/dola-cookie-profiles/${encodeURIComponent(id)}`, { method: "DELETE" }),
   vpnStatus: () => request<{ ok: boolean; connected: boolean; config_name?: string; username_masked?: string; ip?: string; error?: string }>("/api/vpn/status"),
   testVpn: (config_name = "") => request<{ ok: boolean; connected: boolean; config_name?: string; username_masked?: string; ip?: string; ip_before?: string }>("/api/vpn/test", { method: "POST", body: JSON.stringify({ config_name }) }),
   testIsolatedVpn: (config_name = "") => request<{ ok: boolean; slot_id: string; config_name?: string; username_masked?: string; ip?: string; cdp: boolean; log_urls?: Record<string, string> }>("/api/vpn/test-isolated", { method: "POST", body: JSON.stringify({ config_name }) }),
@@ -57,10 +84,11 @@ export const api = {
   chrome: () => request<{ available: boolean; path: string }>("/api/system/chrome"),
   dolaBrowser: () => request<DolaBrowserStatus>("/api/system/dola-browser", undefined, 5000),
   studioStatus: async () => {
-    const status = await request<{ jobs: Job[]; settings: SettingsPayload; logs: Array<{ id: string; level: string; message: string; created_at: string; job_id?: string | null }>; browser: DolaBrowserStatus }>("/api/studio/status", undefined, 10000)
+    const status = await request<{ jobs: Job[]; settings: SettingsPayload; logs: Array<{ id: string; level: string; message: string; created_at: string; job_id?: string | null }>; browser: DolaBrowserStatus; cookie_profiles: CookieProfile[] }>("/api/studio/status", undefined, 10000)
     return {
       ...status,
       jobs: Array.isArray(status.jobs) ? status.jobs.map(normalizeJob) : [],
+      cookie_profiles: Array.isArray(status.cookie_profiles) ? status.cookie_profiles : [],
     }
   },
   killAllDolaBrowserSlots: () => request<{ ok: boolean; closed_browser_slots: number; closed_vpn_slots: number; vpn_disconnected: boolean }>("/api/system/dola-browser/kill-all", { method: "POST" }),
@@ -70,6 +98,7 @@ export const api = {
   },
   createVideoJob: async (payload: unknown) => normalizeJob(await request<Job>("/api/video/jobs", { method: "POST", body: JSON.stringify(payload) })),
   cancelVideoJob: async (id: string) => normalizeJob(await request<Job>(`/api/video/jobs/${id}/cancel`, { method: "POST" })),
+  resumeVideoJob: async (id: string) => normalizeJob(await request<Job>(`/api/video/jobs/${id}/resume`, { method: "POST" })),
   resumeVideoItemPoll: (jobId: string, itemId: string) => request<{ ok: boolean; queued: boolean }>(`/api/video/jobs/${jobId}/items/${itemId}/resume-poll`, { method: "POST" }),
   forceStopVideoItem: (jobId: string, itemId: string) => request<{ ok: boolean; stopped: boolean }>(`/api/video/jobs/${jobId}/items/${itemId}/force-stop`, { method: "POST" }),
   restartVideoItem: (jobId: string, itemId: string) => request<{ ok: boolean; queued: boolean }>(`/api/video/jobs/${jobId}/items/${itemId}/restart`, { method: "POST" }),

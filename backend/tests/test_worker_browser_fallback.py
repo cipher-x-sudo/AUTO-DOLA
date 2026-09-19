@@ -41,3 +41,5 @@ def test_enabled_direct_submit_preserves_existing_routing() -> None:
     assert resolve_effective_dola_mode("direct", 10, True) == "direct"
     assert resolve_effective_dola_mode("hybrid", 10, True) == "hybrid"
     assert resolve_effective_dola_mode("hybrid", 15, True) == "browser"
+    assert resolve_effective_dola_mode("hybrid", 30, True) == "browser"
+    assert resolve_effective_dola_mode("hybrid", 10, True, "seedance_v2.5") == "browser"

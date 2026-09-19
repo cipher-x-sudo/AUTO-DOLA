@@ -16,12 +16,21 @@ engine = create_engine(settings.database_url, **engine_kwargs)
 
 
 def init_db() -> None:
-    SQLModel.metadata.create_all(engine)
-    ensure_runtime_columns()
+    if is_sqlite:
+        SQLModel.metadata.create_all(engine)
+        ensure_runtime_columns()
+        return
+    # API and worker start together; serialize PostgreSQL DDL so CREATE TYPE/table
+    # checks cannot race during a fresh deployment.
+    with engine.begin() as connection:
+        connection.execute(text("SELECT pg_advisory_xact_lock(730104021)"))
+        SQLModel.metadata.create_all(connection)
+        ensure_runtime_columns(connection)
 
 
-def ensure_runtime_columns() -> None:
-    inspector = inspect(engine)
+def ensure_runtime_columns(connection=None) -> None:
+    bind = connection or engine
+    inspector = inspect(bind)
     table_names = inspector.get_table_names()
     if "job" not in table_names:
         return
@@ -43,9 +52,13 @@ def ensure_runtime_columns() -> None:
             )
     if not statements:
         return
-    with engine.begin() as connection:
+    if connection is not None:
         for ddl in statements:
             connection.execute(text(ddl))
+    else:
+        with engine.begin() as connection:
+            for ddl in statements:
+                connection.execute(text(ddl))
 
 
 def get_session() -> Generator[Session, None, None]:

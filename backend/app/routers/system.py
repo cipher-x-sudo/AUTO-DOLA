@@ -9,7 +9,7 @@ from app.config import settings
 from app.database import get_session
 from app.services.dola import dola_session_status
 from app.services.dola_browser import DolaBrowserClient
-from app.services.settings import load_public_settings
+from app.services.settings import load_app_settings, load_public_settings
 from app.services.system import chrome_status, ffmpeg_status
 
 router = APIRouter(prefix="/api/system", tags=["system"])
@@ -39,7 +39,7 @@ def get_chrome() -> dict:
 
 @router.get("/dola-session")
 async def get_dola_session(session: Session = Depends(get_session)) -> dict:
-    app_settings = load_public_settings(session)
+    app_settings = load_app_settings(session, include_secrets=True)
     return await dola_session_status(app_settings.get("dola_auth_cookies", settings.dola_auth_cookies), settings.dola_default_region)
 
 

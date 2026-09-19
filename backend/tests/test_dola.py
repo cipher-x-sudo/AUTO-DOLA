@@ -1,8 +1,11 @@
+import base64
+import hashlib
 import json
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import pytest
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from httpx import Request, Response
 
 from app.services.dola import (
@@ -12,10 +15,14 @@ from app.services.dola import (
     DolaSubmissionError,
     PAYLOAD_TEMPLATE_VERSION,
     PLAY_INFO_POLL_ATTEMPTS,
+    QAAB_SALT,
     VIDEO_POLL_ATTEMPTS,
     base_payload,
+    build_unwatermarked_fallback_url,
     build_dola_payload,
     build_chain_poll_body,
+    decode_dola_main_url,
+    find_dola_fallback_apis,
     format_cookie_header,
     merge_cookies,
     parse_cookie_text,
@@ -23,12 +30,14 @@ from app.services.dola import (
     parse_assistant_messages_from_stream,
     parse_conversation_from_stream,
     parse_play_info,
+    parse_unwatermarked_video_url,
     parse_submit_response,
     parse_vid,
     parse_vid_with_diagnostics,
     extract_chain_texts,
     is_terminal_video_failure,
     read_auth_cookies,
+    suggested_video_duration_from_message,
 )
 from app.services.raw_responses import split_response_body
 
@@ -52,6 +61,21 @@ def test_build_payload_includes_seedance_duration_and_prompt() -> None:
     assert payload["messages"][0]["content_block"][0]["content"]["text_block"]["text"] == "Generate video: cinematic city flythrough"
     assert payload["chat_ability"]["ability_type"] == 17
     assert json.loads(payload["chat_ability"]["ability_param"]) == {"model": "seedance_v2.0", "duration": 15, "ratio": "9:16"}
+
+
+def test_build_payload_supports_seedance_25_and_long_duration() -> None:
+    payload = build_dola_payload(base_payload(), "cinematic city flythrough", 60, "16:9", "seedance_v2.5")
+    assert json.loads(payload["chat_ability"]["ability_param"]) == {"model": "seedance_v2.5", "duration": 60, "ratio": "16:9"}
+
+
+def test_suggested_video_duration_detects_dola_nearest_supported_duration() -> None:
+    message = (
+        "Video generation currently supports durations from 4 to 15 seconds. "
+        "I can generate it at the nearest supported duration of 15 seconds."
+    )
+    assert suggested_video_duration_from_message(message, 30) == 15
+    assert suggested_video_duration_from_message(message, 60) == 15
+    assert suggested_video_duration_from_message(message, 15) is None
 
 
 def test_base_payload_matches_browser_shape() -> None:
@@ -139,7 +163,7 @@ async def test_build_session_includes_fresh_cookies_and_webview_headers(monkeypa
 
     assert "ttwid=fresh" in session.headers["cookie"]
     assert "hook_slardar_session_id=hook" in session.headers["cookie"]
-    assert "sid=abc" not in session.headers["cookie"]
+    assert "sid=abc" in session.headers["cookie"]
     assert "s_v_web_id=verify_" in session.headers["cookie"]
     assert f"s_v_web_id={session.fp}" in session.headers["cookie"]
     assert session.payload_template["ext"]["fp"] == session.fp
@@ -149,7 +173,7 @@ async def test_build_session_includes_fresh_cookies_and_webview_headers(monkeypa
     assert session.headers["sec-ch-ua-mobile"] == "?1"
     assert session.has_ttwid is True
     assert session.has_hook_slardar is True
-    assert session.has_auth_cookies is False
+    assert session.has_auth_cookies is True
     query = parse_qs(urlparse(session.url).query)
     assert query["aid"] == ["495671"]
     assert query["real_aid"] == ["495671"]
@@ -189,9 +213,9 @@ async def test_common_invalid_param_has_redacted_diagnostic(monkeypatch: pytest.
     diagnostic = exc_info.value.diagnostic
     assert diagnostic["has_ttwid"] is True
     assert diagnostic["has_hook_slardar"] is False
-    assert diagnostic["has_auth_cookies"] is False
-    assert diagnostic["cookie_count"] == 4
-    assert diagnostic["cookie_names"] == ["i18next", "flow_user_country", "s_v_web_id", "ttwid"]
+    assert diagnostic["has_auth_cookies"] is True
+    assert diagnostic["cookie_count"] == 5
+    assert diagnostic["cookie_names"] == ["i18next", "flow_user_country", "s_v_web_id", "sid", "ttwid"]
     assert diagnostic["payload_template_version"] == PAYLOAD_TEMPLATE_VERSION
     assert diagnostic["option_key_count"] >= 30
     assert diagnostic["has_ext_fp"] is True
@@ -312,6 +336,67 @@ async def test_poll_video_id_returns_none_when_no_vid(monkeypatch: pytest.Monkey
     assert await client.poll_video_id(session, "12345", 3, max_attempts=1, sleep_seconds=0, log_fn=lambda message, _level: logs.append(message)) is None
     assert fake.posts[0]["url"] == "https://www.dola.com/im/chain/single?fp=verify_test&web_platform=web"
     assert logs == ["Polling video id 1/1"]
+
+
+@pytest.mark.asyncio
+async def test_poll_video_id_can_switch_to_automatic_duration_fallback_conversation(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = DolaClient()
+    fake = FakeCurlSession(
+        [
+            Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": {
+                        "messages": [
+                            {
+                                "content": (
+                                    "Video generation currently supports durations from 4 to 15 seconds. "
+                                    "I can generate it at the nearest supported duration of 15 seconds."
+                                )
+                            }
+                        ]
+                    },
+                },
+                request=Request("POST", "https://www.dola.com/im/chain/single"),
+            ),
+            Response(
+                200,
+                json={"code": 0, "data": {"vid": "vid-fallback"}},
+                request=Request("POST", "https://www.dola.com/im/chain/single"),
+            ),
+        ]
+    )
+    monkeypatch.setattr(client, "_session", lambda: fake)
+    session = DolaSession(
+        url="https://www.dola.com/chat/completion?fp=verify_test&web_platform=web",
+        headers={"cookie": "ttwid=fresh"},
+        payload_template={},
+        fp="verify_test",
+        has_ttwid=True,
+        has_hook_slardar=False,
+        has_auth_cookies=False,
+    )
+
+    replacements: list[str] = []
+
+    async def replace_conversation(_message: str) -> tuple[str, int]:
+        replacements.append("confirmed")
+        return "67890", 3
+
+    vid = await client.poll_video_id(
+        session,
+        "12345",
+        3,
+        max_attempts=2,
+        sleep_seconds=0,
+        assistant_message_fn=replace_conversation,
+    )
+
+    assert vid == "vid-fallback"
+    assert replacements == ["confirmed"]
+    second_poll = fake.posts[1]
+    assert second_poll["json"]["uplink_body"]["pull_singe_chain_uplink_body"]["conversation_id"] == "67890"
 
 
 @pytest.mark.asyncio
@@ -502,6 +587,103 @@ def test_raw_response_chunking_preserves_original_body() -> None:
 def test_parse_play_info() -> None:
     payload = {"code": 0, "data": {"play_infos": [{"main": "https://cdn.example/video.mp4"}]}}
     assert parse_play_info(payload) == "https://cdn.example/video.mp4"
+
+
+def test_fallback_api_extraction_and_unwatermarked_query() -> None:
+    fallback = "https://video.example/play?channel=old&codec_type=1&token=abc"
+    payload = {
+        "data": {
+            "message": json.dumps({"creation": {"fallback_api": fallback}}),
+        }
+    }
+    raw = r'data: {"fallback_api":"https:\/\/second.example\/play?x=1\u0026y=2"}'
+
+    found = find_dola_fallback_apis(payload, raw)
+
+    assert found == [fallback, "https://second.example/play?x=1&y=2"]
+    query = parse_qs(urlparse(build_unwatermarked_fallback_url(found[0])).query)
+    assert query == {
+        "channel": ["no"],
+        "codec_type": ["8"],
+        "token": ["abc"],
+        "logo_type": ["unwatermarked"],
+    }
+
+
+def test_unwatermarked_parser_picks_highest_quality_and_decodes_base64() -> None:
+    high_url = "https://cdn.example/raw-high.mp4?token=secret"
+    encoded = base64.urlsafe_b64encode(high_url.encode()).decode().rstrip("=")
+    payload = {
+        "video_info": {
+            "data": {
+                "video_list": {
+                    "low": {"main_url": "https://cdn.example/low.mp4", "vwidth": 640, "vheight": 360, "bitrate": 500},
+                    "high": {"main_url": encoded, "vwidth": 1920, "vheight": 1080, "bitrate": 1500},
+                }
+            }
+        }
+    }
+
+    assert parse_unwatermarked_video_url(payload) == high_url
+
+
+def test_qaab_main_url_decoding_matches_extension_algorithm() -> None:
+    url = "https://cdn.example/raw-qaab.mp4?token=signed"
+    seed = b"seedance-key-seed-for-test-0123456789"
+    digest1 = hashlib.sha512(seed[:32]).digest()
+    digest2 = hashlib.sha512(digest1 + QAAB_SALT).digest()
+    key, iv = digest2[:16], digest2[16:32]
+    pad = 16 - len(url.encode()) % 16
+    plain = url.encode() + bytes([pad]) * pad
+    encryptor = Cipher(algorithms.AES(key), modes.CBC(iv)).encryptor()
+    encrypted = encryptor.update(plain) + encryptor.finalize()
+    token = base64.b64encode(b"\xa8\x00\x01\x00" + encrypted).decode()
+    key_seed = base64.b64encode(seed).decode()
+
+    assert token.startswith("qAAB")
+    assert decode_dola_main_url(token, key_seed) == url
+
+
+@pytest.mark.asyncio
+async def test_direct_poll_prefers_fallback_api_unwatermarked_source(monkeypatch: pytest.MonkeyPatch) -> None:
+    fallback_api = "https://video.example/play?token=signed"
+    raw_url = "https://cdn.example/raw.mp4?token=raw"
+    fake = FakeCurlSession(
+        [
+            Response(
+                200,
+                json={"code": 0, "data": {"vid": "vid123", "creation": {"fallback_api": fallback_api}}},
+                request=Request("POST", "https://www.dola.com/im/chain/single"),
+            ),
+            Response(
+                200,
+                json={"video_info": {"data": {"main_url": raw_url}}},
+                request=Request("GET", fallback_api),
+            ),
+        ]
+    )
+    client = DolaClient()
+    monkeypatch.setattr(client, "_session", lambda: fake)
+    session = DolaSession(
+        url="https://www.dola.com/chat/completion?fp=verify_test&web_platform=web",
+        headers={"cookie": "ttwid=fresh"},
+        payload_template={},
+        fp="verify_test",
+        has_ttwid=True,
+        has_hook_slardar=False,
+        has_auth_cookies=False,
+    )
+    logs: list[str] = []
+
+    vid = await client.poll_video_id(session, "conversation", 3, max_attempts=1, sleep_seconds=0, log_fn=lambda message, _level: logs.append(message))
+    download_url = await client.poll_download_url(session, vid or "")
+
+    assert vid == "vid123"
+    assert download_url == raw_url
+    assert session.unwatermarked_url == raw_url
+    fallback_request = fake.posts[0]
+    assert fallback_request["url"].endswith("/im/chain/single?fp=verify_test&web_platform=web")
+    assert any("fallback_api" in message for message in logs)
 
 
 def test_api_logs_route_smoke() -> None:

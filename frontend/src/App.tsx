@@ -1,6 +1,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import {
   Check,
+  ClipboardPaste,
   Copy,
   Download,
   FileText,
@@ -20,7 +21,7 @@ import {
 } from "lucide-react"
 import { toast } from "sonner"
 import { API_BASE, api, artifactUrl, browserScreenshotUrl, subscribeJobEvents } from "@/lib/api"
-import type { Artifact, DolaBrowserStatus, Job, JobItem, Niche, NichePromptGroup, SettingsPayload } from "@/lib/types"
+import type { Artifact, CookieProfile, DolaBrowserStatus, Job, JobItem, Niche, NichePromptGroup, SettingsPayload } from "@/lib/types"
 import { Layout } from "@/components/Layout"
 import { JobTable } from "@/components/JobTable"
 import { Badge, Button, Card, Input, Progress, Select, Textarea } from "@/components/ui"
@@ -123,6 +124,7 @@ export default function App() {
   const [settings, setSettings] = useState<SettingsPayload>(emptySettings)
   const [logs, setLogs] = useState<LogRow[]>([])
   const [browserStatus, setBrowserStatus] = useState<DolaBrowserStatus | null>(null)
+  const [cookieProfiles, setCookieProfiles] = useState<CookieProfile[]>([])
   const [loading, setLoading] = useState(true)
   const [connectionError, setConnectionError] = useState("")
   const [studioPromptText, setStudioPromptText] = useState("")
@@ -163,6 +165,7 @@ export default function App() {
       setSettings(status.settings)
       setLogs(status.logs)
       setBrowserStatus(status.browser)
+      setCookieProfiles(status.cookie_profiles)
       setConnectionError("")
     } catch (error) {
       setConnectionError(error instanceof Error ? error.message : "Studio connection failed")
@@ -236,6 +239,7 @@ export default function App() {
           activeJob={activeJob}
           logs={logs}
           browserStatus={browserStatus}
+          cookieProfiles={cookieProfiles}
           promptText={studioPromptText}
           setPromptText={setStudioPromptText}
           onRefresh={refresh}
@@ -255,6 +259,7 @@ export default function App() {
         <SettingsPage
           settings={settings}
           browserStatus={browserStatus}
+          cookieProfiles={cookieProfiles}
           onSettingsSaved={setSettings}
           onRefresh={refresh}
         />
@@ -269,6 +274,7 @@ function VideoConsole({
   activeJob,
   logs,
   browserStatus,
+  cookieProfiles,
   promptText,
   setPromptText,
   onRefresh,
@@ -279,18 +285,25 @@ function VideoConsole({
   activeJob?: Job
   logs: LogRow[]
   browserStatus: DolaBrowserStatus | null
+  cookieProfiles: CookieProfile[]
   promptText: string
   setPromptText: (value: string) => void
   onRefresh: () => void
   onSettingsSaved: (settings: SettingsPayload) => void
 }) {
   const [ratio, setRatio] = useState(settings.default_ratio || "9:16")
+  const [model, setModel] = useState("seedance_v2.0")
   const [duration, setDuration] = useState(settings.default_duration || 10)
   const [parallel, setParallel] = useState(settings.default_parallel || 30)
-  const [cleanWatermark, setCleanWatermark] = useState(true)
+  const [cleanWatermark, setCleanWatermark] = useState(false)
   const [saveMode, setSaveMode] = useState("final")
   const [submitting, setSubmitting] = useState(false)
   const [logSearch, setLogSearch] = useState("")
+  const [selectedCookieProfileIds, setSelectedCookieProfileIds] = useState<string[]>([])
+
+  useEffect(() => {
+    setSelectedCookieProfileIds((current) => current.filter((id) => cookieProfiles.some((profile) => profile.id === id && profile.enabled)))
+  }, [cookieProfiles])
 
   useEffect(() => {
     setRatio((current) => current || settings.default_ratio || "9:16")
@@ -348,7 +361,7 @@ function VideoConsole({
     }
     setSubmitting(true)
     try {
-      await api.createVideoJob({ prompts, ratio, duration, parallel, save_folder: DOCKER_OUTPUT_DIR, clean_watermark: cleanWatermark, save_mode: saveMode })
+      await api.createVideoJob({ prompts, cookie_profile_ids: selectedCookieProfileIds, model, ratio, duration, parallel, save_folder: DOCKER_OUTPUT_DIR, clean_watermark: cleanWatermark, save_mode: saveMode })
       toast.success("Video generation queued")
       onRefresh()
     } catch (error) {
@@ -458,6 +471,8 @@ function VideoConsole({
       <section className="grid grid-cols-1 gap-5 xl:grid-cols-[minmax(380px,0.42fr)_minmax(520px,0.58fr)]">
         <div className="space-y-4">
           <GenerationSettings
+            model={model}
+            setModel={setModel}
             ratio={ratio}
             setRatio={setRatio}
             duration={duration}
@@ -481,7 +496,17 @@ function VideoConsole({
           <GenerationQueue
             items={queueRows}
             snapshots={displaySnapshots}
+            pausedJobId={primaryDisplayJob?.status === "paused" ? primaryDisplayJob.id : undefined}
             onResumePoll={resumePoll}
+            onResumeJob={async (jobId) => {
+              try {
+                await api.resumeVideoJob(jobId)
+                toast.success("Paused job resumed")
+                onRefresh()
+              } catch (error) {
+                toast.error(error instanceof Error ? error.message : "Failed to resume job")
+              }
+            }}
             onForceStop={forceStopItem}
             onRestart={restartItem}
             browserUrl={browserStatus?.manual_url || "http://localhost:6080"}
@@ -490,6 +515,7 @@ function VideoConsole({
 
         <div className="space-y-4">
           <PromptsPanel promptText={promptText} setPromptText={setPromptText} count={promptLines(promptText).length} />
+          <CookiePriorityPanel profiles={cookieProfiles} selectedIds={selectedCookieProfileIds} setSelectedIds={setSelectedCookieProfileIds} />
           <LiveLogConsole logs={filteredLogs} search={logSearch} setSearch={setLogSearch} />
         </div>
       </section>
@@ -530,11 +556,13 @@ function networkModeLabel(settings: SettingsPayload): string {
 function SettingsPage({
   settings,
   browserStatus,
+  cookieProfiles,
   onSettingsSaved,
   onRefresh,
 }: {
   settings: SettingsPayload
   browserStatus: DolaBrowserStatus | null
+  cookieProfiles: CookieProfile[]
   onSettingsSaved: (settings: SettingsPayload) => void
   onRefresh: () => void
 }) {
@@ -549,6 +577,13 @@ function SettingsPage({
   const [testingVpn, setTestingVpn] = useState(false)
   const [settingsDirty, setSettingsDirty] = useState(false)
   const vpnFileRef = useRef<HTMLInputElement>(null)
+  const cookieFileRef = useRef<HTMLInputElement>(null)
+  const cookieReplaceFileRef = useRef<HTMLInputElement>(null)
+  const [cookieName, setCookieName] = useState("")
+  const [cookieDailyLimit, setCookieDailyLimit] = useState(3)
+  const [cookieText, setCookieText] = useState("")
+  const [replaceCookieId, setReplaceCookieId] = useState("")
+  const [testingCookieId, setTestingCookieId] = useState("")
 
   useEffect(() => {
     if (settingsDirty) return
@@ -630,6 +665,89 @@ function SettingsPage({
       refreshVpn()
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "VPN delete failed")
+    }
+  }
+
+  async function importCookieFile(file: File | undefined) {
+    if (!file) return
+    if (!cookieName.trim()) {
+      toast.error("Add a profile name first.")
+      return
+    }
+    try {
+      await api.importCookieProfile(file, cookieName, cookieDailyLimit)
+      setCookieName("")
+      setCookieDailyLimit(3)
+      toast.success("Dola cookie profile imported")
+      onRefresh()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Cookie import failed")
+    }
+  }
+
+  async function importCookieText() {
+    if (!cookieName.trim()) {
+      toast.error("Add a profile name first.")
+      return
+    }
+    if (!cookieText.trim()) {
+      toast.error("Paste cookie JSON first.")
+      return
+    }
+    try {
+      await api.importCookieProfile(undefined, cookieName, cookieDailyLimit, cookieText)
+      setCookieName("")
+      setCookieDailyLimit(3)
+      setCookieText("")
+      toast.success("Dola cookie profile imported")
+      onRefresh()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Cookie import failed")
+    }
+  }
+
+  async function replaceCookieFile(file: File | undefined) {
+    if (!file || !replaceCookieId) return
+    try {
+      await api.replaceCookieProfile(replaceCookieId, file)
+      toast.success("Dola cookie profile replaced")
+      setReplaceCookieId("")
+      onRefresh()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Cookie replacement failed")
+    }
+  }
+
+  async function updateCookieProfile(id: string, payload: { enabled?: boolean; daily_limit?: number }) {
+    try {
+      await api.updateCookieProfile(id, payload)
+      toast.success("Cookie profile updated")
+      onRefresh()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Cookie profile update failed")
+    }
+  }
+
+  async function testCookieProfile(id: string) {
+    setTestingCookieId(id)
+    try {
+      const profile = await api.testCookieProfile(id)
+      profile.validation_status === "valid" ? toast.success("Dola cookies are valid") : toast.error(profile.validation_error || "Dola did not confirm these cookies")
+      onRefresh()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Cookie validation failed")
+    } finally {
+      setTestingCookieId("")
+    }
+  }
+
+  async function deleteCookieProfile(id: string) {
+    try {
+      await api.deleteCookieProfile(id)
+      toast.success("Cookie profile deleted")
+      onRefresh()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Cookie profile delete failed")
     }
   }
 
@@ -771,6 +889,55 @@ function SettingsPage({
       </Card>
 
       <Card className="p-4">
+        <SectionTitle icon={<Upload size={15} />} title="Dola Cookie Profiles" badge={`${cookieProfiles.length} profile${cookieProfiles.length === 1 ? "" : "s"}`} />
+        <p className="mt-2 text-xs font-semibold text-muted-foreground">Import browser-export JSON. Cookie values are encrypted and never shown.</p>
+        <div className="mt-4 grid gap-3 sm:grid-cols-[minmax(0,1fr)_120px_auto]">
+          <Input value={cookieName} onChange={(event) => setCookieName(event.target.value)} placeholder="Profile name (e.g. Account 1)" />
+          <Input type="number" min={1} value={cookieDailyLimit} onChange={(event) => setCookieDailyLimit(Math.max(1, Number(event.target.value) || 1))} placeholder="Daily limit" />
+          <>
+            <input ref={cookieFileRef} type="file" accept=".json,application/json" className="hidden" onChange={(event) => { const file = event.target.files?.[0]; void importCookieFile(file); event.target.value = "" }} />
+            <Button variant="secondary" onClick={() => cookieFileRef.current?.click()}><Upload size={16} />Import JSON</Button>
+          </>
+        </div>
+        <div className="mt-3 grid gap-2">
+          <Textarea
+            value={cookieText}
+            onChange={(event) => setCookieText(event.target.value)}
+            placeholder={'Paste browser-export JSON array or { "cookie": "value" } map here…'}
+            className="min-h-[150px] font-mono text-[11px] leading-5"
+            spellCheck={false}
+            aria-label="Paste Dola cookie JSON"
+          />
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span className="text-[11px] font-semibold text-muted-foreground">Only non-expired Dola cookies are kept. Raw values are never displayed.</span>
+            <Button variant="secondary" onClick={() => void importCookieText()} disabled={!cookieName.trim() || !cookieText.trim()}>
+              <ClipboardPaste size={16} />Import pasted JSON
+            </Button>
+          </div>
+        </div>
+        <input ref={cookieReplaceFileRef} type="file" accept=".json,application/json" className="hidden" onChange={(event) => { const file = event.target.files?.[0]; void replaceCookieFile(file); event.target.value = "" }} />
+        <div className="mt-4 grid gap-2">
+          {!cookieProfiles.length && <div className="rounded-md border border-border bg-background px-3 py-3 text-xs font-semibold text-muted-foreground">No cookie profiles imported yet.</div>}
+          {cookieProfiles.map((profile) => (
+            <div key={profile.id} className="flex flex-col gap-3 rounded-md border border-border bg-background px-3 py-3 text-xs sm:flex-row sm:items-center">
+              <div className="min-w-0 flex-1">
+                <div className="truncate font-black">{profile.name} <span className={profile.enabled ? "text-emerald-300" : "text-muted-foreground"}>{profile.enabled ? "enabled" : "disabled"}</span></div>
+                <div className="mt-1 text-[11px] font-semibold text-muted-foreground">{profile.cookie_count} cookies · {profile.completed_today}/{profile.daily_limit} completed today · {profile.remaining_today} remaining · validation: {profile.validation_status}</div>
+                {profile.validation_error && <div className="mt-1 truncate text-[11px] text-amber-200">{profile.validation_error}</div>}
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <Input aria-label={`${profile.name} daily limit`} className="h-8 w-20 text-[11px]" type="number" min={1} defaultValue={profile.daily_limit} onBlur={(event) => { const value = Math.max(1, Number(event.target.value) || 1); if (value !== profile.daily_limit) void updateCookieProfile(profile.id, { daily_limit: value }) }} />
+                <Button variant="secondary" className="h-8 px-2 text-[11px]" onClick={() => void testCookieProfile(profile.id)} disabled={testingCookieId === profile.id}>{testingCookieId === profile.id ? <Loader2 className="animate-spin" size={13} /> : <Zap size={13} />}Test</Button>
+                <Button variant="secondary" className="h-8 px-2 text-[11px]" onClick={() => { setReplaceCookieId(profile.id); cookieReplaceFileRef.current?.click() }}><Upload size={13} />Replace</Button>
+                <Button variant="secondary" className="h-8 px-2 text-[11px]" onClick={() => void updateCookieProfile(profile.id, { enabled: !profile.enabled })}>{profile.enabled ? "Disable" : "Enable"}</Button>
+                <Button variant="secondary" className="h-8 px-2 text-[11px] text-red-200 hover:text-red-100" onClick={() => void deleteCookieProfile(profile.id)}><Trash2 size={13} />Delete</Button>
+              </div>
+            </div>
+          ))}
+        </div>
+      </Card>
+
+      <Card className="p-4">
         <SectionTitle icon={<Terminal size={15} />} title="Dola Browser" />
         <div className="mt-3 text-xs font-semibold text-muted-foreground">
           <div>Current mode: {networkModeLabel(settings)}</div>
@@ -784,6 +951,8 @@ function SettingsPage({
 }
 
 function GenerationSettings({
+  model,
+  setModel,
   ratio,
   setRatio,
   duration,
@@ -804,6 +973,8 @@ function GenerationSettings({
   onSetBrowserHeadless,
   onSetDirectDolaSubmitEnabled,
 }: {
+  model: string
+  setModel: (value: string) => void
   ratio: string
   setRatio: (value: string) => void
   duration: number
@@ -829,13 +1000,18 @@ function GenerationSettings({
       <SectionTitle icon={<Settings2 size={15} />} title="Generation Settings" />
       <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
         <Field label="Model">
-          <Select value="Seedance 2.0" disabled><option>Seedance 2.0</option></Select>
+          <Select value={model} onChange={(event) => setModel(event.target.value)}>
+            <option value="seedance_v2.0">Seedance 2.0 Fast</option>
+            <option value="seedance_v2.5">Seedance 2.5 · experimental</option>
+          </Select>
         </Field>
         <Field label="Duration">
           <Select value={String(duration)} onChange={(event) => setDuration(Number(event.target.value))}>
             <option value="5">5</option>
             <option value="10">10</option>
             <option value="15">15</option>
+            <option value="30">30</option>
+            <option value="60">60</option>
           </Select>
         </Field>
         <Field label="Aspect Ratio">
@@ -850,7 +1026,12 @@ function GenerationSettings({
         </Field>
         <label className="flex min-h-10 items-center gap-3 rounded-md border border-border bg-background px-3 text-xs font-black uppercase tracking-wide text-muted-foreground sm:col-span-2">
           <input type="checkbox" checked={cleanWatermark} onChange={(event) => setCleanWatermark(event.target.checked)} className="h-4 w-4 accent-[hsl(var(--primary))]" />
-          Clean watermark after download
+          <span>
+            <span className="block">Run FFmpeg watermark cleanup</span>
+            <span className="mt-1 block text-[11px] font-semibold normal-case tracking-normal text-muted-foreground">
+              Off by default: raw Dola fallback sources are already unwatermarked. Enable only as a fallback.
+            </span>
+          </span>
         </label>
         <div className="flex min-h-10 flex-col gap-3 rounded-md border border-border bg-background px-3 py-3 sm:col-span-2 sm:flex-row sm:items-center sm:justify-between">
           <div>
@@ -938,6 +1119,49 @@ function GenerationSettings({
   )
 }
 
+function CookiePriorityPanel({ profiles, selectedIds, setSelectedIds }: { profiles: CookieProfile[]; selectedIds: string[]; setSelectedIds: (ids: string[]) => void }) {
+  function toggle(id: string) {
+    setSelectedIds(selectedIds.includes(id) ? selectedIds.filter((value) => value !== id) : [...selectedIds, id])
+  }
+
+  function move(id: string, direction: -1 | 1) {
+    const index = selectedIds.indexOf(id)
+    const nextIndex = index + direction
+    if (index < 0 || nextIndex < 0 || nextIndex >= selectedIds.length) return
+    const next = [...selectedIds]
+    ;[next[index], next[nextIndex]] = [next[nextIndex], next[index]]
+    setSelectedIds(next)
+  }
+
+  return (
+    <Card className="p-4">
+      <div className="flex items-center justify-between gap-3">
+        <SectionTitle icon={<Settings2 size={15} />} title="Dola Cookie Priority" badge={selectedIds.length ? `${selectedIds.length} selected` : "anonymous"} />
+      </div>
+      <p className="mt-2 text-xs font-semibold text-muted-foreground">Select accounts in priority order. When one reaches its daily limit, the next account is used.</p>
+      <div className="mt-3 grid gap-2">
+        {!profiles.length && <div className="rounded-md border border-border bg-background px-3 py-3 text-xs font-semibold text-muted-foreground">No cookie profiles imported. Generation will use anonymous Dola sessions.</div>}
+        {profiles.filter((profile) => profile.enabled).map((profile) => {
+          const selectedIndex = selectedIds.indexOf(profile.id)
+          return (
+            <div key={profile.id} className="flex items-center gap-2 rounded-md border border-border bg-background px-3 py-2 text-xs">
+              <input type="checkbox" checked={selectedIndex >= 0} onChange={() => toggle(profile.id)} className="h-4 w-4 accent-[hsl(var(--primary))]" />
+              <div className="min-w-0 flex-1">
+                <div className="truncate font-black">{selectedIndex >= 0 ? `${selectedIndex + 1}. ` : ""}{profile.name}</div>
+                <div className="text-[11px] font-semibold text-muted-foreground">{profile.remaining_today}/{profile.daily_limit} remaining today · {profile.validation_status}</div>
+              </div>
+              {selectedIndex >= 0 && <>
+                <Button variant="secondary" className="h-7 px-2 text-[11px]" onClick={() => move(profile.id, -1)} disabled={selectedIndex === 0}>↑</Button>
+                <Button variant="secondary" className="h-7 px-2 text-[11px]" onClick={() => move(profile.id, 1)} disabled={selectedIndex === selectedIds.length - 1}>↓</Button>
+              </>}
+            </div>
+          )
+        })}
+      </div>
+    </Card>
+  )
+}
+
 function PromptsPanel({ promptText, setPromptText, count }: { promptText: string; setPromptText: (value: string) => void; count: number }) {
   const txtRef = useRef<HTMLInputElement>(null)
   const csvRef = useRef<HTMLInputElement>(null)
@@ -978,14 +1202,18 @@ function PromptsPanel({ promptText, setPromptText, count }: { promptText: string
 function GenerationQueue({
   items,
   snapshots,
+  pausedJobId,
   onResumePoll,
+  onResumeJob,
   onForceStop,
   onRestart,
   browserUrl,
 }: {
   items: QueueRow[]
   snapshots: Array<Record<string, unknown>>
+  pausedJobId?: string
   onResumePoll: (jobId: string, itemId: string) => void
+  onResumeJob: (jobId: string) => void
   onForceStop: (jobId: string, itemId: string) => void
   onRestart: (jobId: string, itemId: string) => void
   browserUrl: string
@@ -1005,7 +1233,10 @@ function GenerationQueue({
   return (
     <Card className="p-4">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <SectionTitle icon={<Zap size={15} />} title="Generation Queue" badge={stableItems.length ? `${stableItems.length} total` : undefined} />
+        <div className="flex items-center gap-2">
+          <SectionTitle icon={<Zap size={15} />} title="Generation Queue" badge={stableItems.length ? `${stableItems.length} total` : undefined} />
+          {pausedJobId && <Button variant="secondary" className="h-8 px-3 text-xs" onClick={() => onResumeJob(pausedJobId)}>Resume paused job</Button>}
+        </div>
         {stableItems.length > QUEUE_PAGE_SIZE && (
           <div className="flex items-center gap-2 text-xs font-bold text-muted-foreground">
             <Button variant="secondary" className="h-8 px-2 text-xs" onClick={() => setPage((current) => Math.max(1, current - 1))} disabled={safePage <= 1}>
@@ -1646,6 +1877,8 @@ function PromptGenerator({
                   <option value="5">5</option>
                   <option value="10">10</option>
                   <option value="15">15</option>
+                  <option value="30">30</option>
+                  <option value="60">60</option>
                 </Select>
               </Field>
             </div>
@@ -2058,6 +2291,7 @@ function tone(status: string): "default" | "success" | "warn" | "error" | "muted
   if (status === "completed") return "success"
   if (status === "failed") return "error"
   if (status === "running") return "default"
+  if (status === "paused") return "warn"
   if (status === "cancelled") return "warn"
   return "muted"
 }

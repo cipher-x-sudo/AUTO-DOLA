@@ -52,6 +52,8 @@ Check session readiness without exposing cookie values:
 Invoke-RestMethod http://localhost:8000/api/system/dola-session
 ```
 
+Video jobs expose Seedance 2.0 Fast and Seedance 2.5 as model choices, with 5, 10, 15, 30, and 60 second duration requests. The 30/60 second and 2.5 options are sent in the Dola generation payload; in browser mode AUTO-DOLA also verifies the captured request and reports an options mismatch instead of silently submitting a different model or duration if Dola rejects or rewrites it.
+
 ## Development
 
 ```powershell
@@ -65,3 +67,5 @@ Backend code lives in `backend/app`. Frontend code lives in `frontend/src`.
 ## Security Notes
 
 AUTO-DOLA expects user-provided credentials/cookies/API keys through settings or `.env`. It does not ship vendor credentials and does not implement license bypass behavior.
+
+The dashboard also supports multiple Dola cookie profiles. Import a browser-export JSON file from Settings, assign each profile a daily generation limit, and select an ordered priority list on the Video page. Cookie values are encrypted at rest and redacted from API responses and logs. Expired or non-Dola cookies are ignored. When selected profiles reach their daily capacity, remaining items stay queued and the job can be resumed manually after capacity is available.

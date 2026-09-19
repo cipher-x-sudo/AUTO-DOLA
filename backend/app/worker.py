@@ -17,6 +17,15 @@ from sqlmodel import Session, select
 from app.config import settings
 from app.database import engine, init_db
 from app.models import Artifact, ItemStatus, Job, JobItem, JobKind, JobStatus, utcnow
+from app.services.cookie_profiles import (
+    CookieReservation,
+    cookies_from_encrypted,
+    job_snapshots,
+    complete_profile_reservation,
+    release_profile_reservation,
+    reserve_profile,
+    cookie_header_from_encrypted,
+)
 from app.services.cookie_snapshots import (
     append_raw_response_event,
     create_cookie_snapshot,
@@ -25,12 +34,21 @@ from app.services.cookie_snapshots import (
     mark_cookie_snapshot_conversation,
     update_cookie_snapshot,
 )
-from app.services.dola import DolaClient, DolaSubmissionError, DolaTerminalGenerationError, VIDEO_POLL_ATTEMPTS, build_dola_payload, format_diagnostic, is_terminal_video_failure
+from app.services.dola import (
+    DolaClient,
+    DolaSubmissionError,
+    DolaTerminalGenerationError,
+    VIDEO_POLL_ATTEMPTS,
+    build_dola_payload,
+    format_diagnostic,
+    is_terminal_video_failure,
+    suggested_video_duration_from_message,
+)
 from app.services.dola_browser import DolaBrowserClient, DolaBrowserError, format_browser_diagnostic
 from app.services.images import generate_image
 from app.services.jobs import add_artifact, log, mark_item, recompute_job
 from app.services.media import clean_video, safe_filename
-from app.services.settings import load_app_settings
+from app.services.settings import load_app_settings, load_public_settings
 from app.services.tts import synthesize
 from app.services.vpn import choose_vpn_config, choose_vpn_username, vpn_config_path
 
@@ -68,10 +86,16 @@ def effective_video_parallel(value: object, max_parallel: int = MAX_DOLA_PARALLE
     return max(1, min(requested, max_parallel))
 
 
-def resolve_effective_dola_mode(configured_mode: str, duration: int, direct_submit_enabled: bool) -> str:
+def resolve_effective_dola_mode(
+    configured_mode: str,
+    duration: int,
+    direct_submit_enabled: bool,
+    model: str = "seedance_v2.0",
+) -> str:
     if not direct_submit_enabled:
         return "browser"
-    return "browser" if configured_mode == "hybrid" and duration == 15 else configured_mode
+    needs_browser_override = duration not in {5, 10} or model != "seedance_v2.0"
+    return "browser" if configured_mode == "hybrid" and needs_browser_override else configured_mode
 
 
 ACTIVE_RUN_KEY = "_active_run_id"
@@ -151,10 +175,25 @@ async def process_video(session: Session, job: Job, only_item_id: UUID | None = 
     if dola_mode not in {"direct", "browser", "hybrid"}:
         dola_mode = "hybrid"
     requested_duration = int(config.get("duration", 10))
+    requested_model = str(config.get("model") or "seedance_v2.0")
     direct_dola_submit_enabled = bool(app_settings.get("direct_dola_submit_enabled", True))
-    effective_dola_mode = resolve_effective_dola_mode(dola_mode, requested_duration, direct_dola_submit_enabled)
-    submit_client = DolaClient(app_settings.get("dola_auth_cookies", settings.dola_auth_cookies), settings.dola_default_region, proxy=proxy_url)
+    effective_dola_mode = resolve_effective_dola_mode(dola_mode, requested_duration, direct_dola_submit_enabled, requested_model)
+    profile_snapshots = job_snapshots(session, job.id)
+    legacy_auth_cookies = app_settings.get("dola_auth_cookies", settings.dola_auth_cookies)
+    submit_client = DolaClient(legacy_auth_cookies, settings.dola_default_region, proxy=proxy_url)
     poll_client = DolaClient(app_settings.get("dola_auth_cookies", settings.dola_auth_cookies), settings.dola_default_region)
+    profile_clients: dict[str, DolaClient] = {}
+
+    def submit_client_for(snapshot) -> DolaClient:
+        if snapshot is None:
+            return submit_client
+        key = str(snapshot.id)
+        client = profile_clients.get(key)
+        if client is None:
+            client = DolaClient(cookie_header_from_encrypted(snapshot.cookies_encrypted), settings.dola_default_region, proxy=proxy_url)
+            profile_clients[key] = client
+        return client
+
     browser_client = DolaBrowserClient(proxy_url=proxy_url, headless=browser_headless)
     items = session.exec(select(JobItem).where(JobItem.job_id == job.id).order_by(JobItem.created_at.asc(), JobItem.id.asc())).all()
     item_numbers = {item.id: index + 1 for index, item in enumerate(items)}
@@ -163,7 +202,7 @@ async def process_video(session: Session, job: Job, only_item_id: UUID | None = 
     parallel = effective_video_parallel(requested_parallel)
     log(session, f"Video concurrency requested: {requested_parallel}", "info", job.id)
     log(session, f"Video concurrency effective: {parallel}", "info", job.id)
-    log(session, f"Video settings: duration={requested_duration}, ratio={config.get('ratio', '9:16')}, mode={effective_dola_mode}, direct_http_submit_enabled={direct_dola_submit_enabled}, submit_proxy_enabled={bool(proxy_url)}, vpn_enabled={vpn_enabled}, browser_headless={browser_headless}, polling_proxy_enabled=False", "info", job.id)
+    log(session, f"Video settings: model={requested_model}, duration={requested_duration}, ratio={config.get('ratio', '9:16')}, mode={effective_dola_mode}, direct_http_submit_enabled={direct_dola_submit_enabled}, submit_proxy_enabled={bool(proxy_url)}, vpn_enabled={vpn_enabled}, browser_headless={browser_headless}, polling_proxy_enabled=False", "info", job.id)
     max_retries = max(int(config.get("max_retries", 3)), HIGH_DEMAND_MIN_RETRIES)
     semaphore = asyncio.Semaphore(parallel)
     browser_submit_semaphore = asyncio.Semaphore(parallel if vpn_enabled else min(BROWSER_SUBMIT_PARALLEL, parallel))
@@ -207,6 +246,8 @@ async def process_video(session: Session, job: Job, only_item_id: UUID | None = 
     async def _run_item(item: JobItem) -> None:
         async with semaphore:
             session_local = Session(engine)
+            reservation: CookieReservation | None = None
+            reservation_completed = False
             try:
                 db_item = session_local.get(JobItem, item.id)
                 db_job = session_local.get(Job, job.id)
@@ -214,6 +255,13 @@ async def process_video(session: Session, job: Job, only_item_id: UUID | None = 
                     if db_item:
                         mark_item(session_local, db_item, ItemStatus.cancelled, "Force stopped")
                     return
+                if db_item.status in {ItemStatus.completed, ItemStatus.failed, ItemStatus.cancelled}:
+                    return
+                reservation = reserve_profile(session_local, profile_snapshots)
+                if profile_snapshots and reservation is None:
+                    mark_item(session_local, db_item, ItemStatus.queued, "Waiting for cookie profile daily capacity")
+                    return
+                selected_auth_cookies = cookies_from_encrypted(reservation.snapshot.cookies_encrypted) if reservation else None
                 run_id = uuid4().hex
                 db_item.diagnostic_json = {**(db_item.diagnostic_json or {}), ACTIVE_RUN_KEY: run_id}
                 db_item.updated_at = utcnow()
@@ -248,6 +296,16 @@ async def process_video(session: Session, job: Job, only_item_id: UUID | None = 
                     if job_cancelled_or_missing():
                         raise JobCancelled("Force stopped")
 
+                def finalize_reservation(success: bool) -> None:
+                    nonlocal reservation_completed
+                    if not reservation or reservation_completed:
+                        return
+                    if success:
+                        complete_profile_reservation(session_local, reservation)
+                    else:
+                        release_profile_reservation(session_local, reservation)
+                    reservation_completed = True
+
                 async def wait_before_retry(delay_seconds: float) -> bool:
                     remaining = delay_seconds
                     while remaining > 0:
@@ -272,7 +330,7 @@ async def process_video(session: Session, job: Job, only_item_id: UUID | None = 
                         raw_path,
                         final_path,
                         str(config.get("save_mode") or "final").lower(),
-                        bool(config.get("clean_watermark", True)),
+                        bool(config.get("clean_watermark", False)),
                         lambda message, level="info": item_log(message, level),
                         lambda action: mark_item(session_local, db_item, ItemStatus.running, f"{action_prefix}{action}"),
                     )
@@ -280,6 +338,7 @@ async def process_video(session: Session, job: Job, only_item_id: UUID | None = 
                     ensure_current_run()
                     artifact = Artifact(job_id=job.id, item_id=db_item.id, kind="video", path=str(artifact_path), filename=artifact_path.name, mime_type="video/mp4", size_bytes=artifact_path.stat().st_size)
                     add_artifact(session_local, artifact, db_item)
+                    finalize_reservation(True)
                     mark_item(session_local, db_item, ItemStatus.completed, artifact_path.name)
                     item_log(f"Completed video: {artifact_path.name}", "success")
 
@@ -322,17 +381,47 @@ async def process_video(session: Session, job: Job, only_item_id: UUID | None = 
 
                     def browser_submit_log(message: str, level: str = "info") -> None:
                         progress_prefixes = (
+                            "[Browser step ",
+                            "Navigating to Dola ",
+                            "Dola navigation completed",
+                            "Dola document loaded",
+                            "Browser navigation event ",
+                            "Browser document request ",
+                            "Browser DOMContentLoaded ",
                             "Waiting for Dola page ",
+                            "Video tab control detected",
+                            "Finding Video tab",
+                            "Clicking Video tab",
                             "Video tab clicked",
+                            "Video tab inactive",
+                            "Video mode active",
                             "Video controls ready",
+                            "Finding model control",
+                            "Model control found",
+                            "Opening model menu",
+                            "Clicking model option",
+                            "Selecting model ",
+                            "Model selected: ",
+                            "Finding ratio control",
+                            "Opening ratio menu",
+                            "Clicking ratio option",
                             "Selecting ratio ",
                             "Ratio selected: ",
+                            "Finding duration control",
+                            "Opening duration menu",
+                            "Clicking duration option",
                             "Selecting duration ",
                             "Duration selected: ",
+                            "Finding video prompt textbox",
+                            "Clicking video prompt textbox",
+                            "Typing prompt into video textbox",
                             "Generation options verified",
                             "Entering prompt",
+                            "Prompt text verified",
                             "Prompt verified",
+                            "Finding enabled submit button",
                             "Waiting for submit button",
+                            "Clicking enabled submit button",
                             "Submitting prompt",
                             "Submission captured",
                         )
@@ -383,6 +472,8 @@ async def process_video(session: Session, job: Job, only_item_id: UUID | None = 
                                 db_item.prompt,
                                 int(config.get("duration", 10)),
                                 str(config.get("ratio", "9:16")),
+                                requested_model,
+                                auth_cookies=selected_auth_cookies,
                                 log_fn=browser_submit_log,
                             )
                         except DolaBrowserError as exc:
@@ -422,11 +513,16 @@ async def process_video(session: Session, job: Job, only_item_id: UUID | None = 
                                 "vpn_slot_id": vpn_slot_id,
                                 "vpn_slot_container": vpn_slot_container,
                                 "requested_duration": browser_result.diagnostic.get("requested_duration"),
+                                "requested_model": browser_result.diagnostic.get("requested_model"),
                                 "visible_duration": browser_result.diagnostic.get("visible_duration"),
+                                "visible_model": browser_result.diagnostic.get("visible_model"),
                                 "captured_duration": browser_result.diagnostic.get("captured_duration"),
+                                "captured_model": browser_result.diagnostic.get("captured_model"),
                                 "captured_ratio": browser_result.diagnostic.get("captured_ratio"),
                                 "duration_patch_expected": browser_result.diagnostic.get("duration_patch_expected"),
                                 "duration_patch_applied": browser_result.diagnostic.get("duration_patch_applied"),
+                                "model_patch_expected": browser_result.diagnostic.get("model_patch_expected"),
+                                "model_patch_applied": browser_result.diagnostic.get("model_patch_applied"),
                                 "captured_endpoint": browser_result.diagnostic.get("captured_endpoint"),
                             },
                             extra_payload={
@@ -495,6 +591,49 @@ async def process_video(session: Session, job: Job, only_item_id: UUID | None = 
                             browser_completed = True
                             return True
 
+                        browser_duration_fallback_used = False
+
+                        async def browser_duration_fallback(message: str) -> tuple[str, int] | None:
+                            nonlocal browser_duration_fallback_used
+                            fallback_duration = suggested_video_duration_from_message(
+                                message,
+                                int(config.get("duration", 10)),
+                            )
+                            if fallback_duration is None:
+                                return None
+                            if browser_duration_fallback_used:
+                                raise DolaTerminalGenerationError(
+                                    "Dola continued to reject the requested duration after the automatic 15-second fallback."
+                                )
+                            browser_duration_fallback_used = True
+                            retry_duration = int(config.get("duration", 10))
+                            item_log(
+                                f"Dola requested duration confirmation. Sending 'OK Generate please.' and retrying requested duration {retry_duration}s.",
+                                "warn",
+                            )
+                            fallback_prompt = f"OK Generate please. Use the original request: {db_item.prompt}"
+                            fallback_payload = build_dola_payload(
+                                browser_result.session.payload_template,
+                                fallback_prompt,
+                                retry_duration,
+                                str(config.get("ratio", "9:16")),
+                                requested_model,
+                            )
+                            fallback_result = await poll_client.submit(browser_result.session, fallback_payload, attempt=attempt)
+                            fallback_hint = fallback_result.conversation_id[-8:]
+                            mark_cookie_snapshot_conversation(
+                                session_local,
+                                job.id,
+                                browser_snapshot["snapshot_id"],
+                                fallback_result.conversation_id,
+                                fallback_result.conversation_type,
+                            )
+                            item_log(
+                                f"Automatic confirmation submitted with requested duration {retry_duration}s, conversation_id=*{fallback_hint}.",
+                                "success",
+                            )
+                            return fallback_result.conversation_id, fallback_result.conversation_type
+
                         vid = await poll_client.poll_video_id(
                             browser_result.session,
                             browser_result.conversation_id,
@@ -502,6 +641,7 @@ async def process_video(session: Session, job: Job, only_item_id: UUID | None = 
                             max_attempts=VIDEO_POLL_ATTEMPTS,
                             log_fn=lambda message, level: progress_log()(f"Dola browser session: {message}" if not message.startswith("Polling ") else message, level),
                             cancel_fn=job_cancelled_or_missing,
+                            assistant_message_fn=browser_duration_fallback,
                         )
                         if not vid:
                             if await run_browser_download_fallback("video id not returned"):
@@ -539,7 +679,8 @@ async def process_video(session: Session, job: Job, only_item_id: UUID | None = 
                             return
                         mark_item(session_local, db_item, ItemStatus.running, f"{action_prefix}Building Dola session")
                         ensure_current_run()
-                        dola_session = await submit_client.build_session()
+                        active_submit_client = submit_client_for(reservation.snapshot if reservation else None)
+                        dola_session = await active_submit_client.build_session()
                         ensure_not_cancelled(session_local, db_item.id)
                         cookie_snapshot = create_cookie_snapshot(session_local, job.id, db_item.id, attempt, dola_session)
 
@@ -559,11 +700,17 @@ async def process_video(session: Session, job: Job, only_item_id: UUID | None = 
 
                         if not dola_session.has_auth_cookies:
                             item_log("Using anonymous Dola session with fresh public cookies.", "info")
-                        payload = build_dola_payload(dola_session.payload_template, db_item.prompt, config.get("duration", 10), config.get("ratio", "9:16"))
+                        payload = build_dola_payload(
+                            dola_session.payload_template,
+                            db_item.prompt,
+                            config.get("duration", 10),
+                            config.get("ratio", "9:16"),
+                            requested_model,
+                        )
                         ensure_not_cancelled(session_local, db_item.id)
                         mark_item(session_local, db_item, ItemStatus.running, f"{action_prefix}Submitting Seedance request")
                         ensure_current_run()
-                        submit_result = await submit_client.submit(dola_session, payload, raw_response_fn=record_raw_response, attempt=attempt)
+                        submit_result = await active_submit_client.submit(dola_session, payload, raw_response_fn=record_raw_response, attempt=attempt)
                         ensure_not_cancelled(session_local, db_item.id)
                         conversation_id = submit_result.conversation_id
                         conversation_type = submit_result.conversation_type
@@ -575,15 +722,65 @@ async def process_video(session: Session, job: Job, only_item_id: UUID | None = 
                                 item_log(f"Dola: {assistant_message}", "warn")
                                 raise DolaTerminalGenerationError(f"Dola rejected this prompt: {assistant_message[:500]}")
                             item_log(f"Dola: {assistant_message}", "info")
+
+                        duration_fallback_used = False
+
+                        async def duration_fallback(message: str) -> tuple[str, int] | None:
+                            nonlocal duration_fallback_used
+                            fallback_duration = suggested_video_duration_from_message(
+                                message,
+                                int(config.get("duration", 10)),
+                            )
+                            if fallback_duration is None:
+                                return None
+                            if duration_fallback_used:
+                                raise DolaTerminalGenerationError(
+                                    "Dola continued to reject the requested duration after the automatic 15-second fallback."
+                                )
+                            duration_fallback_used = True
+                            retry_duration = int(config.get("duration", 10))
+                            item_log(
+                                f"Dola requested duration confirmation. Sending 'OK Generate please.' and retrying requested duration {retry_duration}s.",
+                                "warn",
+                            )
+                            fallback_prompt = f"OK Generate please. Use the original request: {db_item.prompt}"
+                            fallback_payload = build_dola_payload(
+                                dola_session.payload_template,
+                                fallback_prompt,
+                                retry_duration,
+                                str(config.get("ratio", "9:16")),
+                                requested_model,
+                            )
+                            fallback_result = await active_submit_client.submit(
+                                dola_session,
+                                fallback_payload,
+                                raw_response_fn=record_raw_response,
+                                attempt=attempt,
+                            )
+                            fallback_hint = fallback_result.conversation_id[-8:]
+                            mark_cookie_snapshot_conversation(
+                                session_local,
+                                job.id,
+                                cookie_snapshot["snapshot_id"],
+                                fallback_result.conversation_id,
+                                fallback_result.conversation_type,
+                            )
+                            item_log(
+                                f"Automatic confirmation submitted with requested duration {retry_duration}s, conversation_id=*{fallback_hint}.",
+                                "success",
+                            )
+                            return fallback_result.conversation_id, fallback_result.conversation_type
+
                         mark_item(session_local, db_item, ItemStatus.running, f"{action_prefix}Processing video request")
                         ensure_current_run()
-                        vid = await poll_client.poll_video_id(
+                        vid = await active_submit_client.poll_video_id(
                             dola_session,
                             conversation_id,
                             conversation_type,
                             log_fn=lambda message, level: progress_log()(f"Dola: {message}" if not message.startswith("Polling ") else message, level),
                             raw_response_fn=record_raw_response,
                             cancel_fn=job_cancelled_or_missing,
+                            assistant_message_fn=duration_fallback,
                         )
                         if job_cancelled_or_missing():
                             current_item = session_local.get(JobItem, db_item.id)
@@ -598,7 +795,7 @@ async def process_video(session: Session, job: Job, only_item_id: UUID | None = 
                             raise RuntimeError("Dola did not return video id.")
                         mark_item(session_local, db_item, ItemStatus.running, f"{action_prefix}Polling download URL")
                         ensure_current_run()
-                        download_url = await poll_client.poll_download_url(
+                        download_url = await active_submit_client.poll_download_url(
                             dola_session,
                             vid,
                             raw_response_fn=record_raw_response,
@@ -678,6 +875,11 @@ async def process_video(session: Session, job: Job, only_item_id: UUID | None = 
                 mark_item(session_local, db_item, ItemStatus.failed, "Failed", last_error, diagnostic=last_diagnostic)
                 item_log(f"Item failed after {max_retries} attempts: {last_error}", "error")
             finally:
+                if reservation and not reservation_completed:
+                    try:
+                        release_profile_reservation(session_local, reservation)
+                    except Exception:
+                        logger.exception("Could not release Dola cookie reservation for item %s", item.id)
                 session_local.close()
 
     try:
@@ -690,8 +892,22 @@ async def process_video(session: Session, job: Job, only_item_id: UUID | None = 
                 if failed_item and failed_item.status not in {ItemStatus.completed, ItemStatus.cancelled}:
                     mark_item(error_session, failed_item, ItemStatus.failed, "Worker error", str(result), diagnostic={"error_type": "ITEM_WORKER_ERROR", "error_msg": str(result)})
                 log(error_session, f"[Video item | {item.id.hex[:8]}] Unhandled item error: {result}", "error", job.id)
+        if profile_snapshots:
+            with Session(engine) as state_session:
+                current_job = state_session.get(Job, job.id)
+                queued_items = state_session.exec(
+                    select(JobItem).where(JobItem.job_id == job.id, JobItem.status == ItemStatus.queued)
+                ).all()
+                if current_job and queued_items and current_job.status != JobStatus.cancelled:
+                    current_job.status = JobStatus.paused
+                    current_job.updated_at = utcnow()
+                    state_session.add(current_job)
+                    state_session.commit()
+                    log(state_session, "Paused: all selected cookie profiles reached today's generation capacity. Resume manually when capacity is available.", "warn", job.id)
     finally:
         await submit_client.aclose()
+        for client in profile_clients.values():
+            await client.aclose()
         await poll_client.aclose()
         await browser_client.close()
 
@@ -779,7 +995,7 @@ async def _resume_video_item_poll(job_id: UUID, item_id: UUID) -> None:
             raw_path,
             final_path,
             save_mode,
-            bool(config.get("clean_watermark", True)),
+            bool(config.get("clean_watermark", False)),
             lambda message, level="info": log(session, f"[Resume poll | {item.id.hex[:8]}] {message}", level, job.id),
             lambda action: mark_item(session, item, ItemStatus.running, action),
         )
@@ -937,6 +1153,9 @@ def save_downloaded_video(
             log_fn("Watermark cleanup removed raw file; using final video artifact.", "warn")
             return final_path
         raise DownloadError("DOWNLOAD_FILE_MISSING", "MP4 download failed: raw file was not created.", {"raw_path": str(raw_path), "final_path": str(final_path)})
+    # The Dola fallback_api source is already unwatermarked. Preserve it as-is
+    # unless the user explicitly opted into the FFmpeg cleanup fallback.
+    log_fn("FFmpeg watermark cleanup disabled; saving raw Dola source directly.", "info")
     shutil.copyfile(raw_path, final_path)
     ensure_video_file(final_path, "FINAL_FILE_MISSING")
     artifact_path = final_path

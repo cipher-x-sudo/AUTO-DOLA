@@ -95,3 +95,22 @@ def test_save_downloaded_video_uses_final_if_cleanup_succeeds(monkeypatch: pytes
     assert artifact == final
     assert final.read_bytes() == b"final"
     assert not raw.exists()
+
+
+def test_save_downloaded_video_skips_cleanup_when_disabled(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    raw = tmp_path / "video_raw.mp4"
+    final = tmp_path / "video.mp4"
+    raw.write_bytes(b"raw-unwatermarked")
+
+    def fail_if_called(*_args: object, **_kwargs: object) -> bool:
+        raise AssertionError("FFmpeg cleanup must not run when disabled")
+
+    monkeypatch.setattr(worker, "clean_video", fail_if_called)
+    messages: list[str] = []
+
+    artifact = worker.save_downloaded_video(raw, final, "final", False, lambda message, _level: messages.append(message), lambda *_args: None)
+
+    assert artifact == final
+    assert final.read_bytes() == b"raw-unwatermarked"
+    assert not raw.exists()
+    assert any("cleanup disabled" in message for message in messages)

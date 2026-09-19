@@ -1,4 +1,4 @@
-export type JobStatus = "queued" | "running" | "completed" | "failed" | "cancelled"
+export type JobStatus = "queued" | "running" | "paused" | "completed" | "failed" | "cancelled"
 
 export interface JobItem {
   id: string
@@ -59,6 +59,24 @@ export interface SettingsPayload {
   direct_dola_submit_enabled: boolean
   tts_default_voice: string
   dola_mode: "direct" | "browser" | "hybrid"
+}
+
+export interface CookieProfile {
+  id: string
+  name: string
+  cookie_names: string[]
+  cookie_count: number
+  daily_limit: number
+  enabled: boolean
+  validation_status: "pending" | "valid" | "invalid" | string
+  validation_error?: string | null
+  usage_day: string
+  completed_today: number
+  reserved_today: number
+  remaining_today: number
+  created_at: string
+  updated_at: string
+  deleted?: boolean
 }
 
 export interface DolaBrowserStatus {
