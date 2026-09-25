@@ -355,6 +355,24 @@ def _is_tls_error(exc: BaseException) -> bool:
     return "curl: (35)" in text or "tls connect error" in text or "ssl" in text
 
 
+def _is_retryable_harvest_error(exc: BaseException) -> bool:
+    if _is_tls_error(exc):
+        return True
+    text = str(exc).lower()
+    return any(
+        token in text
+        for token in (
+            "fb_dtsg/lsd",
+            "gdp page did not expose",
+            "proxy rate-limit",
+            "timed out",
+            "curl: (28)",
+            "curl: (56)",
+            "curl: (7)",
+        )
+    )
+
+
 def make_session(timeout: int, *, proxy: str = "", user_agent: str = "") -> curl_requests.Session:
     """Build a curl_cffi session. With a proxy, probe TLS until an impersonate works."""
     ua = user_agent.strip() or CHROME_UA
@@ -648,6 +666,19 @@ def confirm_age_gate_if_needed(session: curl_requests.Session, *, debug: bool = 
 
 def _debug_log(msg: str, *, debug: bool) -> None:
     if debug:
+        print(msg, flush=True)
+
+
+# Green + bold success lines (Windows Terminal / modern consoles support ANSI).
+_ANSI_GREEN_BOLD = "\033[1;32m"
+_ANSI_RESET = "\033[0m"
+
+
+def _print_cookie_success(msg: str, *, debug: bool) -> None:
+    """Highlight when Dola cookies are obtained/written. Bold green in --debug."""
+    if debug:
+        print(f"{_ANSI_GREEN_BOLD}{msg}{_ANSI_RESET}", flush=True)
+    else:
         print(msg, flush=True)
 
 
@@ -1087,6 +1118,66 @@ def dola_passport_login(
     raise RuntimeError("Dola passport login did not set session cookies.")
 
 
+def _gdp_html_has_tokens(html: str) -> bool:
+    low = (html or "").lower()
+    if "sorry, something went wrong" in low:
+        return False
+    if len(html or "") < 5000:
+        return False
+    return bool(
+        "fb_dtsg" in (html or "")
+        or "DTSGInitialData" in (html or "")
+        or '"DTSG"' in (html or "")
+        or "DTSGInitData" in (html or "")
+    )
+
+
+def _fetch_fallback_gdp(
+    session: curl_requests.Session,
+    *,
+    logger_id: str,
+    cb: str,
+    frame: str,
+    origin_token: str,
+    debug: bool,
+) -> tuple[str, str]:
+    redirect = build_xd_arbiter_redirect(cb=cb, frame=frame, origin_token=origin_token)
+    gdp_query = urlencode(
+        {
+            "flow": "gdp",
+            "params[app_id]": FACEBOOK_APP_ID,
+            "params[display]": '"popup"',
+            "params[domain]": '"www.dola.com"',
+            "params[fallback_redirect_uri]": '"https:\\/\\/www.dola.com\\/chat\\/"',
+            "params[logger_id]": f'"{logger_id}"',
+            "params[next]": '"confirm"',
+            "params[redirect_uri]": f'"{redirect}"',
+            "params[response_type]": '"token,signed_request,graph_domain"',
+            "params[scope]": "[]",
+            "params[sdk]": '"joey"',
+            "params[steps]": "{}",
+            "params[versioned_sdk]": '"joey"',
+            "params[cui_gk]": '"[PASS]:jssdk,confirm"',
+            "source": "gdp_delegated",
+            "cache_buster": str(random.randint(-10**18, 10**18)),
+        }
+    )
+    gdp_url = f"https://www.facebook.com/privacy/consent/?{gdp_query}"
+    _debug_log(f"fallback GDP -> {gdp_url[:100]}...", debug=debug)
+    response = session.get(
+        gdp_url,
+        headers={
+            "referer": DOLA_HOME,
+            "upgrade-insecure-requests": "1",
+            "sec-fetch-site": "cross-site",
+            "sec-fetch-mode": "navigate",
+            "sec-fetch-dest": "document",
+            "sec-fetch-user": "?1",
+        },
+    )
+    return str(response.url or gdp_url), response.text or ""
+
+
 def fetch_gdp_page(session: curl_requests.Session, *, debug: bool) -> tuple[str, str, dict[str, str]]:
     logger_id = secrets.token_hex(8)
     cb = random_cb()
@@ -1102,49 +1193,49 @@ def fetch_gdp_page(session: curl_requests.Session, *, debug: bool) -> tuple[str,
             "Facebook checkpoint/2FA blocked OAuth before GDP consent. "
             "Unlock the account in a browser, then re-export cookies."
         )
-    land_ok = (
-        "/privacy/consent/" in final_url
-        and ("fb_dtsg" in html or "DTSGInitialData" in html or '"DTSG"' in html)
-        and "sorry, something went wrong" not in html.lower()
-    )
+
+    land_ok = "/privacy/consent/" in final_url and _gdp_html_has_tokens(html)
     if not land_ok:
-        # Match browser GDP (next=confirm, empty steps) — next=read causes error_code=5.
-        redirect = build_xd_arbiter_redirect(cb=cb, frame=frame, origin_token=origin_token)
-        gdp_query = urlencode(
-            {
-                "flow": "gdp",
-                "params[app_id]": FACEBOOK_APP_ID,
-                "params[display]": '"popup"',
-                "params[domain]": '"www.dola.com"',
-                "params[fallback_redirect_uri]": '"https:\\/\\/www.dola.com\\/chat\\/"',
-                "params[logger_id]": f'"{logger_id}"',
-                "params[next]": '"confirm"',
-                "params[redirect_uri]": f'"{redirect}"',
-                "params[response_type]": '"token,signed_request,graph_domain"',
-                "params[scope]": "[]",
-                "params[sdk]": '"joey"',
-                "params[steps]": "{}",
-                "params[versioned_sdk]": '"joey"',
-                "params[cui_gk]": '"[PASS]:jssdk,confirm"',
-                "source": "gdp_delegated",
-                "cache_buster": str(random.randint(-10**18, 10**18)),
-            }
-        )
-        gdp_url = f"https://www.facebook.com/privacy/consent/?{gdp_query}"
-        _debug_log(f"fallback GDP -> {gdp_url[:100]}...", debug=debug)
-        response = session.get(gdp_url, headers={"referer": DOLA_HOME})
-        final_url = str(response.url or gdp_url)
-        html = response.text or ""
-        if page_looks_like_checkpoint(final_url, html):
-            raise RuntimeError(
-                "Facebook checkpoint/2FA on GDP page. Unlock in browser, then re-export cookies."
+        # Concurrent/proxy bursts often return an empty/error GDP shell — retry with fresh params.
+        last_html = html
+        last_url = final_url
+        for attempt in range(1, 4):
+            logger_id = secrets.token_hex(8)
+            cb = random_cb()
+            frame = secrets.token_hex(8)
+            origin_token = dola_fb_origin_token()
+            last_url, last_html = _fetch_fallback_gdp(
+                session,
+                logger_id=logger_id,
+                cb=cb,
+                frame=frame,
+                origin_token=origin_token,
+                debug=debug,
             )
+            if page_looks_like_checkpoint(last_url, last_html):
+                raise RuntimeError(
+                    "Facebook checkpoint/2FA on GDP page. Unlock in browser, then re-export cookies."
+                )
+            if "/privacy/consent/" in last_url and _gdp_html_has_tokens(last_html):
+                final_url, html = last_url, last_html
+                break
+            _debug_log(
+                f"  GDP tokens missing (attempt {attempt}/3, html={len(last_html)}), retry...",
+                debug=debug,
+            )
+            time.sleep(0.6 * attempt + random.random() * 0.4)
+        else:
+            final_url, html = last_url, last_html
+
     if "/privacy/consent/" not in final_url:
         raise RuntimeError(f"Expected GDP consent page, got {urlparse(final_url).path or final_url[:120]}")
     actor_id = session.cookies.get("c_user") or ""
     ctx = scrape_fb_page_context(html, actor_id=actor_id)
     if not ctx.get("fb_dtsg") or not ctx.get("lsd"):
-        raise RuntimeError("GDP page did not expose fb_dtsg/lsd (session may be invalid).")
+        raise RuntimeError(
+            "GDP page did not expose fb_dtsg/lsd "
+            f"(html={len(html)}, likely proxy rate-limit — retry with fewer workers)."
+        )
     gdp_params = parse_gdp_params(final_url)
     if not ctx.get("logger_id"):
         ctx["logger_id"] = gdp_params.get("logger_id") or logger_id
@@ -1378,8 +1469,8 @@ def _process_row(
                 break
             except Exception as exc:
                 last_exc = exc
-                if attempt < 3 and _is_tls_error(exc):
-                    print(f"{prefix} TLS flake (attempt {attempt}/3), retry...", flush=True)
+                if attempt < 3 and _is_retryable_harvest_error(exc):
+                    print(f"{prefix} retryable error (attempt {attempt}/3): {exc}", flush=True)
                     time.sleep(0.8 * attempt)
                     continue
                 raise
@@ -1402,7 +1493,10 @@ def _process_row(
                     "error": "",
                 },
             )
-        print(f"{prefix} saved {paths['json'].name} + {uid_path.name} via {result['strategy']} ({len(cookies)} cookies)")
+        _print_cookie_success(
+            f"{prefix} saved {paths['json'].name} + {uid_path.name} via {result['strategy']} ({len(cookies)} cookies)",
+            debug=bool(args.debug),
+        )
         return {
             "ok": True,
             "facebook_c_user": c_user,
