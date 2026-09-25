@@ -18,15 +18,19 @@ from cookies import (
 from harvest_dola_cookies import (
     access_token_from_status_body,
     apply_facebook_cookies,
+    assign_sticky_proxy,
     extract_html_redirect,
     facebook_login_url,
     facebook_oauth_dialog_url,
     make_session,
+    mask_proxy_url,
+    normalize_proxy_url,
     oauth_values_from_url,
     page_looks_like_checkpoint,
     page_looks_like_facebook_login,
     parse_html_forms,
     pick_continue_form,
+    ProxyPool,
 )
 
 
@@ -190,3 +194,24 @@ def test_cookies_from_jar_unwraps_curl_cffi_wrapper() -> None:
 
     filtered = cookies_from_jar(Wrapper())
     assert [item["name"] for item in filtered] == ["sid_guard"]
+
+
+def test_normalize_proxy_url_formats() -> None:
+    assert normalize_proxy_url("http://u:p@1.2.3.4:8080") == "http://u:p@1.2.3.4:8080"
+    assert normalize_proxy_url("u:p@1.2.3.4:8080") == "http://u:p@1.2.3.4:8080"
+    assert normalize_proxy_url("1.2.3.4:8080:u:p") == "http://u:p@1.2.3.4:8080"
+    assert normalize_proxy_url("1.2.3.4:8080") == "http://1.2.3.4:8080"
+    assert mask_proxy_url("http://user:secret@1.2.3.4:8080") == "http://user:***@1.2.3.4:8080"
+
+
+def test_proxy_pool_leases_unique_slots() -> None:
+    pool = ProxyPool(["http://a:1@1.1.1.1:1", "http://b:2@2.2.2.2:2"])
+    first, slot_a = pool.lease(0)
+    second, slot_b = pool.lease(0)  # preferred busy → other slot
+    assert {slot_a, slot_b} == {0, 1}
+    assert first != second
+    pool.release(slot_a)
+    again, slot_c = pool.lease(0)
+    assert slot_c == 0
+    assert again == "http://a:1@1.1.1.1:1"
+    assert assign_sticky_proxy(["p0", "p1", "p2"], 4) == "p1"

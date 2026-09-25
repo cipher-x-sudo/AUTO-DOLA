@@ -62,6 +62,14 @@ export const api = {
       return res.json() as Promise<CookieProfile>
     })
   },
+  importCookieProfilesBulk: (file: File) => {
+    const form = new FormData()
+    form.append("file", file)
+    return fetch(`${API_BASE}/api/dola-cookie-profiles/import/bulk`, { method: "POST", body: form }).then(async (res) => {
+      if (!res.ok) throw new Error(await res.text())
+      return res.json() as Promise<{ created: number; updated: number; failed: Array<{ name: string; error: string }> }>
+    })
+  },
   updateCookieProfile: (id: string, payload: { name?: string; daily_limit?: number; enabled?: boolean }) =>
     request<CookieProfile>(`/api/dola-cookie-profiles/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify(payload) }),
   replaceCookieProfile: (id: string, file: File | undefined, name?: string, dailyLimit?: number, cookiesJson?: string) => {

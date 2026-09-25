@@ -578,6 +578,7 @@ function SettingsPage({
   const [settingsDirty, setSettingsDirty] = useState(false)
   const vpnFileRef = useRef<HTMLInputElement>(null)
   const cookieFileRef = useRef<HTMLInputElement>(null)
+  const cookieBulkFileRef = useRef<HTMLInputElement>(null)
   const cookieReplaceFileRef = useRef<HTMLInputElement>(null)
   const [cookieName, setCookieName] = useState("")
   const [cookieDailyLimit, setCookieDailyLimit] = useState(3)
@@ -682,6 +683,21 @@ function SettingsPage({
       onRefresh()
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Cookie import failed")
+    }
+  }
+
+  async function importCookieBulkFile(file: File | undefined) {
+    if (!file) return
+    try {
+      const result = await api.importCookieProfilesBulk(file)
+      const failed = result.failed?.length || 0
+      toast.success(`Bulk import: created ${result.created}, updated ${result.updated}, failed ${failed}`)
+      if (failed) {
+        toast.error(result.failed.slice(0, 3).map((item) => `${item.name}: ${item.error}`).join(" · "))
+      }
+      onRefresh()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Bulk cookie import failed")
     }
   }
 
@@ -890,13 +906,17 @@ function SettingsPage({
 
       <Card className="p-4">
         <SectionTitle icon={<Upload size={15} />} title="Dola Cookie Profiles" badge={`${cookieProfiles.length} profile${cookieProfiles.length === 1 ? "" : "s"}`} />
-        <p className="mt-2 text-xs font-semibold text-muted-foreground">Import browser-export JSON. Cookie values are encrypted and never shown.</p>
-        <div className="mt-4 grid gap-3 sm:grid-cols-[minmax(0,1fr)_120px_auto]">
+        <p className="mt-2 text-xs font-semibold text-muted-foreground">Import browser-export JSON or harvester bulk file. Cookie values are encrypted and never shown.</p>
+        <div className="mt-4 grid gap-3 sm:grid-cols-[minmax(0,1fr)_120px_auto_auto]">
           <Input value={cookieName} onChange={(event) => setCookieName(event.target.value)} placeholder="Profile name (e.g. Account 1)" />
           <Input type="number" min={1} value={cookieDailyLimit} onChange={(event) => setCookieDailyLimit(Math.max(1, Number(event.target.value) || 1))} placeholder="Daily limit" />
           <>
             <input ref={cookieFileRef} type="file" accept=".json,application/json" className="hidden" onChange={(event) => { const file = event.target.files?.[0]; void importCookieFile(file); event.target.value = "" }} />
             <Button variant="secondary" onClick={() => cookieFileRef.current?.click()}><Upload size={16} />Import JSON</Button>
+          </>
+          <>
+            <input ref={cookieBulkFileRef} type="file" accept=".json,application/json" className="hidden" onChange={(event) => { const file = event.target.files?.[0]; void importCookieBulkFile(file); event.target.value = "" }} />
+            <Button variant="secondary" onClick={() => cookieBulkFileRef.current?.click()}><Upload size={16} />Import bulk JSON</Button>
           </>
         </div>
         <div className="mt-3 grid gap-2">

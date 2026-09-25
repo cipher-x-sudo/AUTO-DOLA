@@ -212,6 +212,79 @@ def create_profile(session: Session, name: str, daily_limit: int, parsed: Parsed
     return profile
 
 
+def find_profile_by_name(session: Session, name: str) -> DolaCookieProfile | None:
+    clean = name.strip()
+    if not clean:
+        return None
+    return session.exec(
+        select(DolaCookieProfile).where(
+            DolaCookieProfile.deleted_at.is_(None),
+            DolaCookieProfile.name == clean,
+        )
+    ).first()
+
+
+@dataclass
+class BulkImportResult:
+    created: int = 0
+    updated: int = 0
+    failed: list[dict[str, str]] | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "created": self.created,
+            "updated": self.updated,
+            "failed": list(self.failed or []),
+        }
+
+
+def bulk_import_profiles(
+    session: Session,
+    items: list[dict[str, Any]],
+    *,
+    validate: bool = False,
+    validate_fn: Any | None = None,
+) -> BulkImportResult:
+    """Upsert cookie profiles by name. Invalid items go to failed without aborting the batch."""
+    result = BulkImportResult(failed=[])
+    for item in items:
+        name = str(item.get("name") or "").strip()
+        try:
+            daily_limit = int(item.get("daily_limit") or 2)
+            if daily_limit < 1 or daily_limit > 10000:
+                raise ValueError("Daily limit must be between 1 and 10000.")
+            if not name:
+                raise ValueError("Profile name is required.")
+            cookies = item.get("cookies")
+            if not isinstance(cookies, list):
+                raise ValueError("cookies must be a JSON array.")
+            parsed = parse_cookie_json(json.dumps(cookies))
+            existing = find_profile_by_name(session, name)
+            if existing:
+                profile = replace_profile(
+                    session,
+                    existing,
+                    parsed,
+                    name=name,
+                    daily_limit=daily_limit,
+                )
+                result.updated += 1
+            else:
+                profile = create_profile(session, name, daily_limit, parsed)
+                result.created += 1
+            if "enabled" in item:
+                profile.enabled = bool(item.get("enabled"))
+                profile.updated_at = utcnow()
+                session.add(profile)
+                session.commit()
+                session.refresh(profile)
+            if validate and validate_fn is not None:
+                validate_fn(session, profile, parsed.cookie_header)
+        except Exception as exc:
+            result.failed.append({"name": name or "(missing)", "error": str(exc)})
+    return result
+
+
 def replace_profile(session: Session, profile: DolaCookieProfile, parsed: ParsedCookieSet, *, name: str | None = None, daily_limit: int | None = None) -> DolaCookieProfile:
     profile.cookies_encrypted = encrypt_value(parsed.cookies)
     profile.cookie_names_json = parsed.names

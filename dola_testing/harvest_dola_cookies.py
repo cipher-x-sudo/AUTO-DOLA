@@ -3,19 +3,23 @@
 Put one Facebook cookie header per line in input/fb_cookies.txt, then run:
 
     python harvest_dola_cookies.py
-    python harvest_dola_cookies.py --debug
+    python harvest_dola_cookies.py --workers 3 --proxy-file proxies.example.txt --debug
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import random
 import re
 import secrets
 import sys
+import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
@@ -23,6 +27,7 @@ from urllib.parse import parse_qs, urlencode, urljoin, urlparse
 
 from curl_cffi import requests as curl_requests
 
+from bulk_export import build_bulk_payload, profile_entry, write_bulk_import, write_uid_profile
 from cookies import (
     RECOMMENDED_FACEBOOK_COOKIES,
     append_ledger_row,
@@ -52,10 +57,149 @@ SAHARA_DOC_IDS = {
     "validation": ("27704027355919565", "useSaharaCometConsentPromptValidationServerMutation"),
     "outcome": ("9822638027828705", "useSaharaCometConsentPostPromptOutcomeServerMutation"),
 }
+# Match the working Cookie Chrome Open fingerprint (Desktop Chrome 153).
+CHROME_MAJOR = 153
 CHROME_UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    f"(KHTML, like Gecko) Chrome/{CHROME_MAJOR}.0.0.0 Safari/537.36"
 )
+# curl_cffi has no chrome153 yet. Prefer chrome145: chrome146 TLS often breaks
+# through residential HTTP proxies (curl 35 OPENSSL_internal) on dola.com/google.
+CURL_IMPERSONATE_CANDIDATES = (
+    "chrome145",
+    "chrome146",
+    "chrome142",
+    "chrome136",
+    "chrome133a",
+    "chrome131",
+    "chrome124",
+)
+
+
+@dataclass(frozen=True)
+class HarvestContext:
+    proxy: str = ""
+    user_agent: str = ""
+    debug: bool = False
+    log_prefix: str = ""
+
+
+def desktop_ua_for_c_user(c_user: str) -> str:
+    # Keep one sticky Desktop Chrome UA (same as working cookie tool).
+    _ = c_user
+    return CHROME_UA
+
+
+def chrome_client_hint_headers(ua: str) -> dict[str, str]:
+    match = re.search(r"Chrome/(\d+)", ua or "")
+    major = match.group(1) if match else str(CHROME_MAJOR)
+    return {
+        "sec-ch-ua": f'"Google Chrome";v="{major}", "Chromium";v="{major}", "Not A(Brand";v="24"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Windows"',
+    }
+
+
+def normalize_proxy_url(raw: str) -> str:
+    """Normalize common proxy formats to a URL curl_cffi accepts.
+
+    Supported:
+      http://user:pass@host:port
+      socks5://user:pass@host:port
+      user:pass@host:port
+      host:port:user:pass
+      host:port
+    """
+    cleaned = (raw or "").strip()
+    if not cleaned:
+        return ""
+    if "://" in cleaned:
+        return cleaned
+    if "@" in cleaned:
+        return f"http://{cleaned}"
+    parts = cleaned.split(":")
+    if len(parts) == 4:
+        host, port, user, password = parts
+        return f"http://{user}:{password}@{host}:{port}"
+    if len(parts) == 2:
+        return f"http://{cleaned}"
+    return f"http://{cleaned}"
+
+
+def mask_proxy_url(proxy: str) -> str:
+    if not proxy:
+        return ""
+    return re.sub(r"(://[^:/@]+:)[^@]+(@)", r"\1***\2", proxy)
+
+
+def load_proxy_lines(path: Path) -> list[str]:
+    if not path.exists():
+        return []
+    lines: list[str] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        cleaned = line.strip()
+        if cleaned and not cleaned.startswith("#"):
+            lines.append(normalize_proxy_url(cleaned))
+    return lines
+
+
+class ProxyPool:
+    """Lease proxies to workers.
+
+    exclusive=True (default): one unique proxy slot per concurrent thread (sticky IPs).
+    exclusive=False: rotating/dynamic gateway — all workers may share the same proxy URL
+    (exit IP changes per connection on the provider side).
+    """
+
+    def __init__(self, proxies: list[str], *, exclusive: bool = True) -> None:
+        self._proxies = list(proxies)
+        self._exclusive = exclusive and len(proxies) > 0
+        self._available = list(range(len(proxies)))
+        self._lock = threading.Lock()
+        self._cond = threading.Condition(self._lock)
+        self._rr = 0
+
+    def __len__(self) -> int:
+        return len(self._proxies)
+
+    def lease(self, preferred_index: int | None = None) -> tuple[str, int]:
+        if not self._proxies:
+            return "", -1
+        if not self._exclusive:
+            with self._lock:
+                if preferred_index is not None and 0 <= preferred_index < len(self._proxies):
+                    slot = preferred_index
+                else:
+                    slot = self._rr % len(self._proxies)
+                    self._rr += 1
+                return self._proxies[slot], slot
+        with self._cond:
+            while not self._available:
+                self._cond.wait(timeout=120)
+                if not self._available:
+                    raise RuntimeError("Timed out waiting for a free proxy slot.")
+            if preferred_index is not None and preferred_index in self._available:
+                slot = preferred_index
+                self._available.remove(preferred_index)
+            else:
+                slot = self._available.pop(0)
+            return self._proxies[slot], slot
+
+    def release(self, slot: int) -> None:
+        if slot < 0 or not self._exclusive:
+            return
+        with self._cond:
+            if slot not in self._available:
+                self._available.append(slot)
+                self._available.sort()
+            self._cond.notify()
+
+
+def assign_sticky_proxy(proxies: list[str], row_index: int) -> str:
+    """1:1 sticky account→proxy. row_index is 0-based."""
+    if not proxies:
+        return ""
+    return proxies[row_index % len(proxies)]
 
 
 def facebook_login_url(next_url: str = DOLA_HOME) -> str:
@@ -161,10 +305,23 @@ def page_looks_like_facebook_login(url: str, html: str) -> bool:
 
 
 def page_looks_like_checkpoint(url: str, html: str) -> bool:
-    if "/checkpoint" in (url or "").lower():
+    lowered_url = (url or "").lower()
+    if any(token in lowered_url for token in ("/checkpoint", "two_step", "approvals", "security/login")):
         return True
-    head = (html or "")[:2500].lower()
-    return "confirm your identity" in head or "unusual activity" in head or "your account has been locked" in head
+    head = (html or "")[:20000].lower()
+    markers = (
+        "confirm your identity",
+        "unusual activity",
+        "your account has been locked",
+        "two_step_verification",
+        "two-step verification",
+        "login approvals",
+        "we need more information",
+        "suspicious activity",
+        "enter the login code",
+        "authenticate your account",
+    )
+    return any(marker in head for marker in markers)
 
 
 def _json_from_text(text: str) -> dict[str, Any]:
@@ -193,21 +350,55 @@ def access_token_from_status_body(text: str) -> str:
     return match.group(1) if match else ""
 
 
-def make_session(timeout: int) -> curl_requests.Session:
-    for impersonate in ("chrome131", "chrome124", "chrome120", "chrome110"):
+def _is_tls_error(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return "curl: (35)" in text or "tls connect error" in text or "ssl" in text
+
+
+def make_session(timeout: int, *, proxy: str = "", user_agent: str = "") -> curl_requests.Session:
+    """Build a curl_cffi session. With a proxy, probe TLS until an impersonate works."""
+    ua = user_agent.strip() or CHROME_UA
+    proxies = {"http": proxy, "https": proxy} if proxy.strip() else None
+    base_headers = {
+        "accept": (
+            "text/html,application/xhtml+xml,application/xml;q=0.9,"
+            "image/avif,image/webp,image/apng,*/*;q=0.8,"
+            "application/signed-exchange;v=b3;q=0.7"
+        ),
+        "accept-language": "en-US,en;q=0.9",
+        "user-agent": ua,
+        "upgrade-insecure-requests": "1",
+        **chrome_client_hint_headers(ua),
+    }
+    last_exc: Exception | None = None
+    for impersonate in CURL_IMPERSONATE_CANDIDATES:
         try:
-            session = curl_requests.Session(impersonate=impersonate, timeout=timeout, allow_redirects=False)
-            session.headers.update(
-                {
-                    "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                    "accept-language": "en-US,en;q=0.9",
-                    "user-agent": CHROME_UA,
-                }
+            session = curl_requests.Session(
+                impersonate=impersonate,
+                timeout=timeout,
+                allow_redirects=False,
+                proxies=proxies,
             )
+            session.headers.update(base_headers)
+            if proxies:
+                # chrome146+ often fails CONNECT/TLS to dola.com via HTTP proxies.
+                session.get(
+                    "https://www.dola.com/",
+                    headers={"accept": "text/html", "upgrade-insecure-requests": "1"},
+                )
+            setattr(session, "_impersonate", impersonate)
             return session
-        except Exception:
+        except Exception as exc:
+            last_exc = exc
             continue
-    return curl_requests.Session(timeout=timeout, allow_redirects=False)
+    if proxies and last_exc and _is_tls_error(last_exc):
+        raise RuntimeError(
+            f"Proxy TLS failed for all Chrome impersonates ({mask_proxy_url(proxy)}): {last_exc}"
+        ) from last_exc
+    session = curl_requests.Session(timeout=timeout, allow_redirects=False, proxies=proxies)
+    session.headers.update(base_headers)
+    setattr(session, "_impersonate", "")
+    return session
 
 
 def apply_facebook_cookies(session: curl_requests.Session, cookies: dict[str, str]) -> None:
@@ -245,7 +436,8 @@ def extract_html_redirect(html: str, current_url: str) -> str:
     for pattern in patterns:
         match = re.search(pattern, html or "", re.I)
         if match:
-            return urljoin(current_url, match.group(1).replace("&amp;", "&"))
+            target = match.group(1).replace("&amp;", "&").replace("&amp", "&")
+            return urljoin(current_url, target)
     return ""
 
 
@@ -330,6 +522,130 @@ def bootstrap_dola(session: curl_requests.Session) -> None:
     follow(session, f"https://www.dola.com/passport/web/account/info/v2/?account_sdk_source=web&aid={DOLA_AID}")
 
 
+# Captured when Dola shows "Confirm Your Age" (decision=3 → modal → Confirm click).
+AGE_GATE_NEED_CONFIRM_DECISIONS = {2, 3}
+AGE_GATE_PC_VERSION = "3.38.0"
+
+
+def _dola_region(session: curl_requests.Session) -> str:
+    return (
+        session.cookies.get("flow_user_country")
+        or session.cookies.get("store-country-code")
+        or "PK"
+    )
+
+
+def _alice_common_query(session: curl_requests.Session, *, device_id: str = "", web_id: str = "") -> str:
+    """Shared query string for /alice/* web calls (a_bogus omitted; works for age_gate)."""
+    region = _dola_region(session)
+    tea = web_id or str(uuid.uuid4().int)[:19]
+    did = device_id or tea
+    return urlencode(
+        {
+            "version_code": "20800",
+            "language": "en",
+            "device_platform": "web",
+            "doubao_device_platform": "web",
+            "aid": DOLA_AID,
+            "real_aid": DOLA_AID,
+            "pkg_type": "release_version",
+            "device_id": did,
+            "pc_version": AGE_GATE_PC_VERSION,
+            "doubao_pc_version": AGE_GATE_PC_VERSION,
+            "web_id": tea,
+            "tea_uuid": tea,
+            "region": region,
+            "sys_region": region,
+            "samantha_web": "1",
+            "web_platform": "browser",
+            "use-olympus-account": "1",
+            "web_tab_id": str(uuid.uuid4()),
+        }
+    )
+
+
+def _alice_json_headers() -> dict[str, str]:
+    return {
+        "accept": "application/json, text/plain, */*",
+        "content-type": "application/json",
+        "origin": "https://www.dola.com",
+        "referer": DOLA_HOME,
+    }
+
+
+def seed_web_anon_ids(session: curl_requests.Session, *, debug: bool = False) -> tuple[str, str]:
+    """Best-effort device_id/web_id from get_web_anon_id (same as browser before age_gate)."""
+    query = _alice_common_query(session)
+    url = f"https://www.dola.com/alice/user/get_web_anon_id?{query}"
+    try:
+        response = session.post(url, data="{}", headers=_alice_json_headers())
+        payload = _json_from_text(response.text or "")
+        web_id = str(payload.get("web_id") or "")
+        uid = str(payload.get("uid") or "")
+        _debug_log(f"  get_web_anon_id -> web_id={web_id[:12]}... uid={uid[:12]}...", debug=debug)
+        return uid or web_id, web_id or uid
+    except Exception as exc:
+        _debug_log(f"  get_web_anon_id skipped: {exc}", debug=debug)
+        tea = str(uuid.uuid4().int)[:19]
+        return tea, tea
+
+
+def confirm_age_gate_if_needed(session: curl_requests.Session, *, debug: bool = False) -> dict[str, Any]:
+    """Detect Dola age gate via /alice/age_gate/check and auto-Confirm via /report.
+
+    Browser capture (Confirm click):
+      POST /alice/age_gate/check  {"scene":1}
+        -> decision=3 (modal)
+      POST /alice/age_gate/report {"scene":1,"pass":true}
+        -> {"pass":true,"is_minor":false}
+    """
+    device_id, web_id = seed_web_anon_ids(session, debug=debug)
+    query = _alice_common_query(session, device_id=device_id, web_id=web_id)
+    headers = _alice_json_headers()
+    result: dict[str, Any] = {"checked": False, "confirmed": False, "decision": None, "error": ""}
+
+    check_url = f"https://www.dola.com/alice/age_gate/check?{query}"
+    try:
+        check_resp = session.post(check_url, data=json.dumps({"scene": 1}), headers=headers)
+        check_payload = _json_from_text(check_resp.text or "")
+    except Exception as exc:
+        result["error"] = f"age_gate/check failed: {exc}"
+        return result
+
+    result["checked"] = True
+    data = check_payload.get("data") if isinstance(check_payload.get("data"), dict) else {}
+    decision = data.get("decision")
+    result["decision"] = decision
+    result["check"] = {"code": check_payload.get("code"), "data": data}
+    _debug_log(f"  age_gate/check -> code={check_payload.get('code')} decision={decision}", debug=debug)
+
+    needs_confirm = decision in AGE_GATE_NEED_CONFIRM_DECISIONS
+    if not needs_confirm:
+        # Already clear / no modal — nothing to report.
+        return result
+
+    report_url = f"https://www.dola.com/alice/age_gate/report?{query}"
+    try:
+        report_resp = session.post(
+            report_url,
+            data=json.dumps({"scene": 1, "pass": True}),
+            headers=headers,
+        )
+        report_payload = _json_from_text(report_resp.text or "")
+    except Exception as exc:
+        result["error"] = f"age_gate/report failed: {exc}"
+        return result
+
+    report_data = report_payload.get("data") if isinstance(report_payload.get("data"), dict) else {}
+    result["confirmed"] = bool(report_data.get("pass")) or report_payload.get("code") == 0
+    result["report"] = {"code": report_payload.get("code"), "data": report_data}
+    _debug_log(
+        f"  age_gate/report -> code={report_payload.get('code')} pass={report_data.get('pass')}",
+        debug=debug,
+    )
+    return result
+
+
 def _debug_log(msg: str, *, debug: bool) -> None:
     if debug:
         print(msg, flush=True)
@@ -405,21 +721,34 @@ def random_cb() -> str:
     return secrets.token_hex(8)
 
 
-def _xd_arbiter_origin_token() -> str:
-    return "https\\u00253A\\u00252F\\u00252Fwww.dola.com\\u00252Ffe69603bd3ed892b8"
+def dola_fb_origin_token() -> str:
+    """Facebook JS SDK uses a fresh ~17-hex channel path under www.dola.com."""
+    return secrets.token_hex(9)[:17]
 
 
-def quoted_xd_arbiter_for_extra_params(*, cb: str, frame: str) -> str:
+def _xd_arbiter_origin_for_hash(token: str | None = None) -> str:
+    """Origin value embedded in xd_arbiter hash (single-percent-encoded)."""
+    tok = token or dola_fb_origin_token()
+    return "https%3A%2F%2Fwww.dola.com%2F" + tok
+
+
+def _xd_arbiter_origin_for_extra_params(token: str | None = None) -> str:
+    """Origin fragment inside Sahara extra_params redirect_uri JSON string."""
+    tok = token or dola_fb_origin_token()
+    return "https\\u00253A\\u00252F\\u00252Fwww.dola.com\\u00252F" + tok
+
+
+def quoted_xd_arbiter_for_extra_params(*, cb: str, frame: str, origin_token: str | None = None) -> str:
     inner = (
         f"https:\\/\\/staticxx.facebook.com\\/x\\/connect\\/xd_arbiter\\/?version=46"
-        f"#cb={cb}&domain=www.dola.com&is_canvas=false&origin={_xd_arbiter_origin_token()}"
+        f"#cb={cb}&domain=www.dola.com&is_canvas=false&origin={_xd_arbiter_origin_for_extra_params(origin_token)}"
         f"&relation=opener&frame={frame}"
     )
     return f'"{inner}"'
 
 
-def build_xd_arbiter_redirect(*, cb: str, frame: str | None = None) -> str:
-    origin = "https%253A%252F%252Fwww.dola.com%252Ffe69603bd3ed892b8"
+def build_xd_arbiter_redirect(*, cb: str, frame: str | None = None, origin_token: str | None = None) -> str:
+    origin = _xd_arbiter_origin_for_hash(origin_token)
     base = (
         f"https://staticxx.facebook.com/x/connect/xd_arbiter/?version=46"
         f"#cb={cb}&domain=www.dola.com&is_canvas=false&origin={origin}&relation=opener"
@@ -429,15 +758,24 @@ def build_xd_arbiter_redirect(*, cb: str, frame: str | None = None) -> str:
     return base
 
 
-def parse_redirect_parts(redirect_uri: str) -> tuple[str, str]:
+def parse_redirect_parts(redirect_uri: str) -> tuple[str, str, str]:
+    """Return (cb, frame, origin_token) from an xd_arbiter redirect_uri."""
     cb = first_match((r"#cb=([0-9a-f]+)", r"cb=([0-9a-f]+)"), redirect_uri) or random_cb()
     frame = first_match((r"frame=([0-9a-f]+)",), redirect_uri) or secrets.token_hex(8)
-    return cb, frame
+    token = first_match(
+        (
+            r"www\.dola\.com(?:%2F|%252F|/|\\u00252F)([a-f0-9]{15,20})",
+            r"dola\.com/([a-f0-9]{15,20})",
+        ),
+        redirect_uri,
+    )
+    return cb, frame, token
 
 
-def build_sdk_oauth_url(*, logger_id: str, cb: str, frame: str | None = None) -> str:
-    redirect_uri = build_xd_arbiter_redirect(cb=cb, frame=frame)
-    channel_url = build_xd_arbiter_redirect(cb=random_cb())
+def build_sdk_oauth_url(*, logger_id: str, cb: str, frame: str | None = None, origin_token: str | None = None) -> str:
+    token = origin_token or dola_fb_origin_token()
+    redirect_uri = build_xd_arbiter_redirect(cb=cb, frame=frame, origin_token=token)
+    channel_url = build_xd_arbiter_redirect(cb=random_cb(), origin_token=token)
     query = urlencode(
         {
             "app_id": FACEBOOK_APP_ID,
@@ -470,14 +808,56 @@ def parse_gdp_params(gdp_url: str) -> dict[str, str]:
     return nested
 
 
+def quote_redirect_uri_for_extra_params(raw_redirect: str) -> str:
+    """Format GDP redirect_uri the way Sahara extra_params_json expects."""
+    cleaned = (raw_redirect or "").strip().strip('"')
+    if not cleaned:
+        return '""'
+    cleaned = cleaned.replace("\\/", "/")
+    escaped: list[str] = []
+    i = 0
+    while i < len(cleaned):
+        if cleaned.startswith("\\u0025", i):
+            escaped.append("\\u0025")
+            i += 6
+            continue
+        ch = cleaned[i]
+        if ch == "%" and i + 2 < len(cleaned):
+            escaped.append("\\u0025")
+            escaped.append(cleaned[i + 1 : i + 3])
+            i += 3
+            continue
+        if ch == "/":
+            escaped.append("\\/")
+            i += 1
+            continue
+        escaped.append(ch)
+        i += 1
+    return f'"{"".join(escaped)}"'
+
+
 def build_extra_params_json(gdp_params: dict[str, str], *, experience_id: str) -> str:
-    raw_redirect = (gdp_params.get("redirect_uri") or "").strip('"')
-    cb, frame = parse_redirect_parts(raw_redirect)
+    """Build Sahara extra_params_json from the LIVE GDP URL params (keep real origin).
+
+    Note: GDP page URL may say next=confirm, but Sahara GraphQL (browser) still sends
+    next=read + steps baseline/public_profile. Mixing confirm into GraphQL → field_exception.
+    """
+    raw_redirect = (gdp_params.get("redirect_uri") or "").strip().strip('"')
+    raw_redirect = (
+        raw_redirect.replace("\\/", "/")
+        .replace("\\u00253A", "%3A")
+        .replace("\\u00252F", "%2F")
+    )
     logger_id = (gdp_params.get("logger_id") or secrets.token_hex(8)).strip('"')
     aectx = json.dumps(
         {"id": experience_id, "flows": [{"id": "gdp", "prompts": [{"id": "gdp_read"}]}]},
         separators=(",", ":"),
     )
+    if raw_redirect and "xd_arbiter" in raw_redirect:
+        redirect_quoted = quote_redirect_uri_for_extra_params(raw_redirect)
+    else:
+        cb, frame, token = parse_redirect_parts(raw_redirect)
+        redirect_quoted = quoted_xd_arbiter_for_extra_params(cb=cb, frame=frame, origin_token=token or None)
     payload = {
         "app_id": gdp_params.get("app_id") or FACEBOOK_APP_ID,
         "display": '"popup"',
@@ -485,7 +865,7 @@ def build_extra_params_json(gdp_params: dict[str, str], *, experience_id: str) -
         "fallback_redirect_uri": '"https:\\/\\/www.dola.com\\/chat\\/"',
         "logger_id": f'"{logger_id}"',
         "next": '"read"',
-        "redirect_uri": quoted_xd_arbiter_for_extra_params(cb=cb, frame=frame),
+        "redirect_uri": redirect_quoted,
         "response_type": '"token,signed_request,graph_domain"',
         "scope": "[]",
         "sdk": '"joey"',
@@ -506,6 +886,7 @@ def sahara_input(
     event: str | None = None,
     event_data_json: str | None = None,
 ) -> dict[str, Any]:
+    # Keep device_id:null — browser always sends it; omitting still fails some accounts.
     data: dict[str, Any] = {
         "actor_id": actor_id,
         "client_mutation_id": client_mutation_id,
@@ -548,7 +929,7 @@ def graphql_post(
         "__user": actor_id,
         "__a": "1",
         "__req": str(req_num),
-        "__hs": "20715.HYP:comet_plat_default_pkg.2.1...0",
+        "__hs": ctx.get("__hs") or "20721.HYP:comet_plat_default_pkg.2.1...0",
         "dpr": "1",
         "__ccg": "EXCELLENT",
         "__rev": ctx.get("rev") or "1047958339",
@@ -593,7 +974,15 @@ def extract_consent_complete_url(payload: dict[str, Any]) -> str:
     if match:
         return match.group(0).replace("\\/", "/")
     if "error_code" in uri or "gdp_error" in uri:
-        raise RuntimeError("Sahara returned GDP error redirect (extra_params_json likely invalid).")
+        error_code = ""
+        match = re.search(r"error_code[=%](\d+)", uri) or re.search(r"params\[error_code\]=(\d+)", uri)
+        if match:
+            error_code = match.group(1)
+        detail = f" error_code={error_code}" if error_code else ""
+        raise RuntimeError(
+            f"Sahara GDP rejected consent{detail}. "
+            "Usually Facebook checkpoint/2FA or dead cookies — not a bulk-import bug."
+        )
     flow_outcome = str(outcome.get("flow_outcome") or "")
     if flow_outcome and flow_outcome != "APPROVED":
         raise RuntimeError(f"Sahara outcome not approved: {flow_outcome}")
@@ -702,28 +1091,41 @@ def fetch_gdp_page(session: curl_requests.Session, *, debug: bool) -> tuple[str,
     logger_id = secrets.token_hex(8)
     cb = random_cb()
     frame = secrets.token_hex(8)
-    oauth_url = build_sdk_oauth_url(logger_id=logger_id, cb=cb, frame=frame)
+    origin_token = dola_fb_origin_token()
+    oauth_url = build_sdk_oauth_url(logger_id=logger_id, cb=cb, frame=frame, origin_token=origin_token)
     _debug_log(f"SDK oauth -> {oauth_url[:100]}...", debug=debug)
     response = follow(session, oauth_url)
     final_url = str(getattr(response, "final_url", "") or getattr(response, "url", "") or "")
     html = response.text or ""
-    if "/privacy/consent/" not in final_url:
+    if page_looks_like_checkpoint(final_url, html):
+        raise RuntimeError(
+            "Facebook checkpoint/2FA blocked OAuth before GDP consent. "
+            "Unlock the account in a browser, then re-export cookies."
+        )
+    land_ok = (
+        "/privacy/consent/" in final_url
+        and ("fb_dtsg" in html or "DTSGInitialData" in html or '"DTSG"' in html)
+        and "sorry, something went wrong" not in html.lower()
+    )
+    if not land_ok:
+        # Match browser GDP (next=confirm, empty steps) — next=read causes error_code=5.
+        redirect = build_xd_arbiter_redirect(cb=cb, frame=frame, origin_token=origin_token)
         gdp_query = urlencode(
             {
                 "flow": "gdp",
-                "params[app_id]": f'"{FACEBOOK_APP_ID}"',
+                "params[app_id]": FACEBOOK_APP_ID,
                 "params[display]": '"popup"',
                 "params[domain]": '"www.dola.com"',
-                "params[fallback_redirect_uri]": '"https://www.dola.com/chat/"',
+                "params[fallback_redirect_uri]": '"https:\\/\\/www.dola.com\\/chat\\/"',
                 "params[logger_id]": f'"{logger_id}"',
-                "params[next]": '"read"',
-                "params[redirect_uri]": f'"{build_xd_arbiter_redirect(cb=cb, frame=frame)}"',
+                "params[next]": '"confirm"',
+                "params[redirect_uri]": f'"{redirect}"',
                 "params[response_type]": '"token,signed_request,graph_domain"',
                 "params[scope]": "[]",
                 "params[sdk]": '"joey"',
-                "params[steps]": '{"read":["baseline","public_profile"]}',
+                "params[steps]": "{}",
                 "params[versioned_sdk]": '"joey"',
-                "params[cui_gk]": '"[PASS]:jssdk,read"',
+                "params[cui_gk]": '"[PASS]:jssdk,confirm"',
                 "source": "gdp_delegated",
                 "cache_buster": str(random.randint(-10**18, 10**18)),
             }
@@ -733,6 +1135,10 @@ def fetch_gdp_page(session: curl_requests.Session, *, debug: bool) -> tuple[str,
         response = session.get(gdp_url, headers={"referer": DOLA_HOME})
         final_url = str(response.url or gdp_url)
         html = response.text or ""
+        if page_looks_like_checkpoint(final_url, html):
+            raise RuntimeError(
+                "Facebook checkpoint/2FA on GDP page. Unlock in browser, then re-export cookies."
+            )
     if "/privacy/consent/" not in final_url:
         raise RuntimeError(f"Expected GDP consent page, got {urlparse(final_url).path or final_url[:120]}")
     actor_id = session.cookies.get("c_user") or ""
@@ -781,7 +1187,15 @@ def replay_sahara_consent(session: curl_requests.Session, gdp_url: str, ctx: dic
     }
     mutate("interactions", sahara_input(**base, client_mutation_id="1", event="PROMPT_IMPRESSION", event_data_json='{"prompt_type":8}'))
     mutate("interactions", sahara_input(**base, client_mutation_id="2", event="CONTENT_IMPRESSION", event_data_json="{}"))
-    mutate("validation", sahara_input(**base, client_mutation_id="3"))
+    validation_payload = mutate("validation", sahara_input(**base, client_mutation_id="3"))
+    validation = (validation_payload.get("data") or {}).get("consent_prompt_validation") or {}
+    typename = str(validation.get("__typename") or "")
+    if typename and "AllClear" not in typename:
+        err_text = ""
+        errors = validation.get("errors") or []
+        if errors and isinstance(errors[0], dict):
+            err_text = str(((errors[0].get("error_message") or {}).get("text")) or errors[0])
+        raise RuntimeError(f"Sahara validation failed ({typename}): {err_text or 'unknown'}")
     outcome_payload = mutate("outcome", sahara_input(**base, client_mutation_id="4"))
     complete_url = extract_consent_complete_url(outcome_payload)
     if not complete_url:
@@ -790,17 +1204,32 @@ def replay_sahara_consent(session: curl_requests.Session, gdp_url: str, ctx: dic
     return complete_url
 
 
-def harvest_one(facebook_cookies: dict[str, str], *, timeout_seconds: int = 90, debug: bool = False) -> dict[str, Any]:
-    fb_session = make_session(timeout_seconds)
+def harvest_one(
+    facebook_cookies: dict[str, str],
+    *,
+    timeout_seconds: int = 90,
+    debug: bool = False,
+    ctx: HarvestContext | None = None,
+) -> dict[str, Any]:
+    harvest_ctx = ctx or HarvestContext(debug=debug)
+    prefix = harvest_ctx.log_prefix or ""
+    ua = harvest_ctx.user_agent or desktop_ua_for_c_user(facebook_c_user(facebook_cookies) or "unknown")
+    fb_session = make_session(timeout_seconds, proxy=harvest_ctx.proxy, user_agent=ua)
     apply_facebook_cookies(fb_session, facebook_cookies)
     minted = mint_facebook_browser_cookies(fb_session)
     if minted:
-        print(f"  minted Facebook cookies: {', '.join(minted)}")
+        print(f"{prefix}  minted Facebook cookies: {', '.join(minted)}")
+    if harvest_ctx.proxy:
+        print(f"{prefix}  proxy={mask_proxy_url(harvest_ctx.proxy)}")
+    print(f"{prefix}  UA={ua}")
+    imp = getattr(fb_session, "_impersonate", "")
+    if imp:
+        print(f"{prefix}  tls={imp}")
     assert_facebook_session(fb_session)
 
-    gdp_url, _html, ctx = fetch_gdp_page(fb_session, debug=debug)
-    complete_url = replay_sahara_consent(fb_session, gdp_url, ctx, debug=debug)
-    access_token = follow_for_access_token(fb_session, complete_url, referer=gdp_url, debug=debug)
+    gdp_url, _html, page_ctx = fetch_gdp_page(fb_session, debug=harvest_ctx.debug)
+    complete_url = replay_sahara_consent(fb_session, gdp_url, page_ctx, debug=harvest_ctx.debug)
+    access_token = follow_for_access_token(fb_session, complete_url, referer=gdp_url, debug=harvest_ctx.debug)
     if not access_token:
         raise RuntimeError("consent/complete did not yield access_token.")
 
@@ -808,14 +1237,32 @@ def harvest_one(facebook_cookies: dict[str, str], *, timeout_seconds: int = 90, 
     if not openid:
         raise RuntimeError("Could not resolve Facebook openid from access_token.")
 
-    dola_session = make_session(timeout_seconds)
+    dola_session = make_session(timeout_seconds, proxy=harvest_ctx.proxy, user_agent=ua)
     bootstrap_dola(dola_session)
     cookies = filter_dola_cookies(
-        dola_passport_login(dola_session, access_token=access_token, openid=openid, debug=debug)
+        dola_passport_login(dola_session, access_token=access_token, openid=openid, debug=harvest_ctx.debug)
     )
     if not has_dola_auth(cookies):
         raise RuntimeError("Dola auth cookies missing after passport login.")
-    return {"cookies": cookies, "strategy": "harvest_via_http"}
+
+    age = confirm_age_gate_if_needed(dola_session, debug=harvest_ctx.debug)
+    if age.get("confirmed"):
+        print(f"{prefix}  age gate: auto-confirmed (decision={age.get('decision')})")
+    elif age.get("checked") and age.get("decision") in AGE_GATE_NEED_CONFIRM_DECISIONS:
+        print(f"{prefix}  age gate: confirm attempted but not passed ({age.get('error') or age.get('report')})")
+    elif age.get("checked"):
+        print(f"{prefix}  age gate: no confirm needed (decision={age.get('decision')})")
+    elif age.get("error"):
+        print(f"{prefix}  age gate: {age['error']}")
+
+    # Re-read cookies in case report set anything new (usually unchanged).
+    cookies = filter_dola_cookies(dola_cookies(dola_session)) or cookies
+    return {
+        "cookies": cookies,
+        "strategy": "harvest_via_http",
+        "user_agent": ua,
+        "age_gate": age,
+    }
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -825,6 +1272,30 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT, help="Output folder.")
     parser.add_argument("--timeout", type=int, default=90, help="HTTP timeout in seconds.")
     parser.add_argument("--debug", action="store_true", help="Print HTTP replay steps.")
+    parser.add_argument("--workers", type=int, default=1, help="Parallel harvest workers (default 1). Capped to proxy count when --proxy-file is set.")
+    parser.add_argument(
+        "--proxy-file",
+        type=Path,
+        default=None,
+        help="One proxy per line. Each concurrent thread leases its own proxy. Sticky: line i prefers proxy i.",
+    )
+    parser.add_argument(
+        "--no-proxy",
+        action="store_true",
+        help="Ignore input/proxies.txt and run direct (no proxy).",
+    )
+    parser.add_argument(
+        "--rotating-proxy",
+        action="store_true",
+        help="Proxy gateway rotates exit IPs. Workers share proxy URL(s); do not exclusive-lease.",
+    )
+    parser.add_argument(
+        "--no-cap-workers-to-proxies",
+        action="store_true",
+        help="Allow more workers than proxies (proxies will be reused after lease release).",
+    )
+    parser.add_argument("--daily-limit", type=int, default=2, help="daily_limit written into bulk import JSON.")
+    parser.add_argument("--bulk-out", type=Path, default=None, help="Bulk AUTO-DOLA import JSON path.")
     return parser.parse_args(argv)
 
 
@@ -843,47 +1314,81 @@ def load_rows(args: argparse.Namespace) -> list[dict[str, str]]:
     return list(unique.values())
 
 
-def _ledger_error(output: Path, stamp: str, c_user: str, status: str, error: str) -> None:
-    append_ledger_row(
-        output,
-        {
-            "timestamp": stamp,
-            "facebook_c_user": c_user,
-            "status": status,
-            "dola_auth": "no",
-            "cookie_names": "",
-            "cookie_header": "",
-            "json_path": "",
-            "error": error,
-        },
+def _ledger_error(output: Path, stamp: str, c_user: str, status: str, error: str, *, lock: threading.Lock | None = None) -> None:
+    row = {
+        "timestamp": stamp,
+        "facebook_c_user": c_user,
+        "status": status,
+        "dola_auth": "no",
+        "cookie_names": "",
+        "cookie_header": "",
+        "json_path": "",
+        "error": error,
+    }
+    if lock:
+        with lock:
+            append_ledger_row(output, row)
+    else:
+        append_ledger_row(output, row)
+
+
+def _process_row(
+    *,
+    index: int,
+    total: int,
+    facebook_cookies: dict[str, str],
+    preferred_proxy_index: int,
+    proxy_pool: ProxyPool | None,
+    args: argparse.Namespace,
+    ledger_lock: threading.Lock,
+) -> dict[str, Any]:
+    c_user = facebook_c_user(facebook_cookies) or "?"
+    stamp = utc_stamp()
+    prefix = f"[{index}/{total} {c_user}]"
+    recommended = [name for name in RECOMMENDED_FACEBOOK_COOKIES if name not in facebook_cookies and name != "sb"]
+    missing = missing_facebook_cookies(facebook_cookies)
+    print(f"{prefix} start")
+    if recommended:
+        print(f"{prefix} missing recommended cookies: {', '.join(recommended)}")
+    if missing:
+        error = f"missing {', '.join(missing)}"
+        print(f"{prefix} skipped, {error}", file=sys.stderr)
+        _ledger_error(args.output, stamp, c_user, "skipped", error, lock=ledger_lock)
+        return {"ok": False, "facebook_c_user": c_user, "error": error}
+
+    proxy = ""
+    proxy_slot = -1
+    if proxy_pool and len(proxy_pool) > 0:
+        proxy, proxy_slot = proxy_pool.lease(preferred_proxy_index)
+        print(f"{prefix} leased proxy slot={proxy_slot} {mask_proxy_url(proxy)}")
+
+    ctx = HarvestContext(
+        proxy=proxy,
+        user_agent=desktop_ua_for_c_user(c_user),
+        debug=args.debug,
+        log_prefix=f"{prefix} ",
     )
-
-
-def main(argv: list[str] | None = None) -> int:
-    args = parse_args(argv)
-    rows = load_rows(args)
-    if not rows:
-        print(f"No Facebook cookies found. Copy fb_cookies.example.txt to {args.file} and paste your cookie header.", file=sys.stderr)
-        return 2
-
-    failures = 0
-    for index, facebook_cookies in enumerate(rows, start=1):
-        c_user = facebook_c_user(facebook_cookies)
-        stamp = utc_stamp()
-        recommended = [name for name in RECOMMENDED_FACEBOOK_COOKIES if name not in facebook_cookies and name != "sb"]
-        missing = missing_facebook_cookies(facebook_cookies)
-        print(f"[{index}/{len(rows)}] Facebook c_user={c_user or '?'}")
-        if recommended:
-            print(f"  missing recommended cookies: {', '.join(recommended)}")
-        if missing:
-            print(f"  skipped, missing {', '.join(missing)}", file=sys.stderr)
-            _ledger_error(args.output, stamp, c_user, "skipped", f"missing {', '.join(missing)}")
-            failures += 1
-            continue
-        try:
-            result = harvest_one(facebook_cookies, timeout_seconds=args.timeout, debug=args.debug)
-            cookies = result["cookies"]
-            paths = write_profile_files(args.output, facebook_c_user_id=c_user, cookies=cookies, stamp=stamp)
+    try:
+        last_exc: Exception | None = None
+        result: dict[str, Any] | None = None
+        for attempt in range(1, 4):
+            try:
+                result = harvest_one(facebook_cookies, timeout_seconds=args.timeout, ctx=ctx)
+                last_exc = None
+                break
+            except Exception as exc:
+                last_exc = exc
+                if attempt < 3 and _is_tls_error(exc):
+                    print(f"{prefix} TLS flake (attempt {attempt}/3), retry...", flush=True)
+                    time.sleep(0.8 * attempt)
+                    continue
+                raise
+        assert result is not None
+        cookies = result["cookies"]
+        paths = write_profile_files(args.output, facebook_c_user_id=c_user, cookies=cookies, stamp=stamp)
+        profiles_dir = args.output / "profiles"
+        uid_path = write_uid_profile(profiles_dir, c_user, cookies)
+        with ledger_lock:
             append_ledger_row(
                 args.output,
                 {
@@ -897,11 +1402,103 @@ def main(argv: list[str] | None = None) -> int:
                     "error": "",
                 },
             )
-            print(f"  saved {paths['json'].name} via {result['strategy']} ({len(cookies)} Dola cookies)")
-        except Exception as exc:
-            failures += 1
-            _ledger_error(args.output, stamp, c_user, "error", str(exc))
-            print(f"  failed: {exc}", file=sys.stderr)
+        print(f"{prefix} saved {paths['json'].name} + {uid_path.name} via {result['strategy']} ({len(cookies)} cookies)")
+        return {
+            "ok": True,
+            "facebook_c_user": c_user,
+            "profile": profile_entry(name=c_user, cookies=cookies, daily_limit=args.daily_limit),
+            "proxy": mask_proxy_url(proxy),
+        }
+    except Exception as exc:
+        print(f"{prefix} failed: {exc}", file=sys.stderr)
+        _ledger_error(args.output, stamp, c_user, "error", str(exc), lock=ledger_lock)
+        return {"ok": False, "facebook_c_user": c_user, "error": str(exc), "proxy": mask_proxy_url(proxy)}
+    finally:
+        if proxy_pool is not None:
+            proxy_pool.release(proxy_slot)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    rows = load_rows(args)
+    if not rows:
+        print(f"No Facebook cookies found. Copy fb_cookies.example.txt to {args.file} and paste your cookie header.", file=sys.stderr)
+        return 2
+
+    proxies: list[str] = []
+    if args.no_proxy:
+        proxies = []
+    else:
+        proxy_path = args.proxy_file or (ROOT / "input" / "proxies.txt")
+        proxies = load_proxy_lines(proxy_path) if proxy_path.exists() else []
+        if args.proxy_file and not proxies:
+            print(f"Warning: proxy file empty or missing: {args.proxy_file}", file=sys.stderr)
+
+    workers = max(1, int(args.workers))
+    rotating = bool(getattr(args, "rotating_proxy", False))
+    # Single gateway + many workers ⇒ almost always a rotating/dynamic residential endpoint.
+    if proxies and workers > len(proxies) and (rotating or len(proxies) == 1):
+        rotating = True
+        print(
+            f"Rotating/dynamic proxy mode: {len(proxies)} gateway(s) shared across {workers} workers "
+            f"(exit IP changes per connection)."
+        )
+    elif proxies and not args.no_cap_workers_to_proxies and workers > len(proxies):
+        print(
+            f"Capping workers {workers} -> {len(proxies)} (sticky 1:1 proxy). "
+            f"For dynamic IP gateway use --rotating-proxy or --no-cap-workers-to-proxies."
+        )
+        workers = len(proxies)
+
+    proxy_pool = ProxyPool(proxies, exclusive=not rotating) if proxies else None
+    if proxies:
+        mode = "rotating/shared" if rotating else "sticky/exclusive"
+        print(
+            f"Harvesting {len(rows)} account(s) with {workers} worker(s), "
+            f"{len(proxies)} proxy(ies) [{mode}]"
+        )
+    bulk_out = args.bulk_out or (args.output / "auto_dola_bulk_import.json")
+    ledger_lock = threading.Lock()
+    successes: list[dict[str, Any]] = []
+    failures: list[dict[str, str]] = []
+
+    tasks: list[tuple[int, dict[str, str], int]] = []
+    for index, facebook_cookies in enumerate(rows, start=1):
+        preferred = (index - 1) % len(proxies) if proxies else -1
+        tasks.append((index, facebook_cookies, preferred))
+
+    if not proxies:
+        print(f"Harvesting {len(tasks)} account(s) with {workers} worker(s) (no proxies)")
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = [
+            executor.submit(
+                _process_row,
+                index=index,
+                total=len(tasks),
+                facebook_cookies=facebook_cookies,
+                preferred_proxy_index=preferred,
+                proxy_pool=proxy_pool,
+                args=args,
+                ledger_lock=ledger_lock,
+            )
+            for index, facebook_cookies, preferred in tasks
+        ]
+        for future in as_completed(futures):
+            result = future.result()
+            if result.get("ok"):
+                successes.append(result["profile"])
+            else:
+                failures.append(
+                    {
+                        "facebook_c_user": str(result.get("facebook_c_user") or ""),
+                        "error": str(result.get("error") or "unknown"),
+                    }
+                )
+
+    payload = build_bulk_payload(profiles=successes, failures=failures, default_daily_limit=args.daily_limit)
+    write_bulk_import(bulk_out, payload)
+    print(f"Bulk import wrote {bulk_out} (ok={len(successes)} failed={len(failures)})")
     return 1 if failures else 0
 
 

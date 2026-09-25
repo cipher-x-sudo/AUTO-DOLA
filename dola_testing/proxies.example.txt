@@ -1,0 +1,16 @@
+# One proxy URL per line. Each concurrent harvest thread leases its own proxy
+# so two workers never share an IP at the same time.
+#
+# Sticky preference: Facebook cookie line i prefers proxy line i (0-based).
+# Workers are capped to proxy count by default.
+#
+# Formats (all OK):
+# http://user:pass@1.2.3.4:8080
+# socks5://user:pass@1.2.3.4:1080
+# user:pass@1.2.3.4:8080
+# 1.2.3.4:8080:user:pass
+# 1.2.3.4:8080
+#
+# Usage:
+#   copy proxies.example.txt -> input/proxies.txt
+#   python harvest_dola_cookies.py --workers 5 --proxy-file input/proxies.txt

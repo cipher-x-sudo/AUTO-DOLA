@@ -103,6 +103,21 @@ class CookieProfileUpdate(BaseModel):
     enabled: bool | None = None
 
 
+class CookieProfileBulkItem(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+    daily_limit: int = Field(default=2, ge=1, le=10000)
+    enabled: bool = True
+    cookies: list[dict[str, Any]] = Field(min_length=1)
+
+
+class CookieProfileBulkImport(BaseModel):
+    profiles: list[CookieProfileBulkItem] = Field(min_length=1)
+    validate: bool = False
+    version: int | None = None
+    default_daily_limit: int | None = None
+    failures: list[dict[str, Any]] | None = None
+
+
 class ProxyTestRequest(BaseModel):
     proxy_url: str
 

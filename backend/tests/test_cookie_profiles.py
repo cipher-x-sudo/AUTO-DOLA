@@ -31,6 +31,55 @@ def test_cookie_json_supports_browser_array_and_map_and_filters_entries() -> Non
     assert mapped.names == ["sessionid", "ttwid"]
 
 
+def test_bulk_import_creates_upserts_and_collects_failures() -> None:
+    from app.services.cookie_profiles import bulk_import_profiles, list_profiles
+
+    db = create_engine("sqlite://", connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(db)
+    with Session(db) as session:
+        first = bulk_import_profiles(
+            session,
+            [
+                {
+                    "name": "61590000000001",
+                    "daily_limit": 2,
+                    "cookies": [{"name": "sessionid", "value": "one", "domain": ".dola.com"}],
+                },
+                {
+                    "name": "61590000000002",
+                    "daily_limit": 2,
+                    "cookies": [{"name": "sessionid", "value": "two", "domain": ".dola.com"}],
+                },
+                {
+                    "name": "bad",
+                    "daily_limit": 2,
+                    "cookies": [{"name": "x", "value": "y", "domain": "example.com"}],
+                },
+            ],
+        )
+        assert first.created == 2
+        assert first.updated == 0
+        assert len(first.failed or []) == 1
+        assert (first.failed or [])[0]["name"] == "bad"
+
+        second = bulk_import_profiles(
+            session,
+            [
+                {
+                    "name": "61590000000001",
+                    "daily_limit": 2,
+                    "cookies": [{"name": "sessionid", "value": "one-v2", "domain": ".dola.com"}],
+                },
+            ],
+        )
+        assert second.created == 0
+        assert second.updated == 1
+        profiles = list_profiles(session)
+        assert {p["name"] for p in profiles} == {"61590000000001", "61590000000002"}
+        renamed = next(p for p in profiles if p["name"] == "61590000000001")
+        assert renamed["daily_limit"] == 2
+
+
 def test_cookie_profile_snapshots_are_encrypted_and_usage_is_reserved_atomically() -> None:
     db = create_engine("sqlite://", connect_args={"check_same_thread": False})
     SQLModel.metadata.create_all(db)

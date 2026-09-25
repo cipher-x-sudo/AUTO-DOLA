@@ -1,0 +1,8 @@
+{
+  "name": "dola-puppeteer-harvest",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "puppeteer-core": "^24.22.3"
+  }
+}

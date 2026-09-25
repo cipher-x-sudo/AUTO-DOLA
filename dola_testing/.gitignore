@@ -2,3 +2,7 @@ input/
 output/
 __pycache__/
 .pytest_cache/
+node_modules/
+*.har
+_*.py
+_*.txt

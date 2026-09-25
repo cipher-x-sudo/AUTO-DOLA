@@ -1,4 +1,15 @@
 # Required: c_user and xs. Recommended: datr, fr.
 # sb is minted automatically on the first Facebook HTTP visit.
+# One Facebook account per line.
+#
 # Example:
 # c_user=YOUR_ID; xs=YOUR_XS; fr=YOUR_FR; datr=YOUR_DATR
+#
+# Parallel harvest with one proxy per concurrent thread:
+#   1. Put proxies in input/proxies.txt (see proxies.example.txt)
+#   2. python harvest_dola_cookies.py --workers 5 --proxy-file input/proxies.txt --daily-limit 2
+# Cookie line i prefers proxy i. Workers auto-cap to proxy count so threads do not share IPs.
+#
+# Outputs:
+#   output/profiles/{c_user}.json
+#   output/auto_dola_bulk_import.json  (upload once in AUTO-DOLA Settings)

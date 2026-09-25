@@ -1,15 +1,20 @@
 from __future__ import annotations
 
+import json
+from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from sqlmodel import Session
 
 from app.database import get_session
 from app.models import DolaCookieProfile, utcnow
 from app.schemas import CookieProfileUpdate
 from app.services.cookie_profiles import (
+    bulk_import_profiles,
+    cookie_header_from_encrypted,
     create_profile,
+    find_profile_by_name,
     list_profiles,
     parse_cookie_json,
     ParsedCookieSet,
@@ -56,6 +61,46 @@ async def _validate_profile(session: Session, profile: DolaCookieProfile, cookie
     update_validation(session, profile, ok=ok, error=error)
 
 
+def _extract_bulk_profiles(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], bool]:
+    profiles = payload.get("profiles")
+    if not isinstance(profiles, list) or not profiles:
+        raise HTTPException(status_code=400, detail="Bulk JSON must include a non-empty profiles array.")
+    return profiles, bool(payload.get("validate", False))
+
+
+async def _parse_bulk_request(request: Request) -> tuple[list[dict[str, Any]], bool]:
+    content_type = (request.headers.get("content-type") or "").lower()
+    if "multipart/form-data" in content_type:
+        form = await request.form()
+        upload = form.get("file")
+        do_validate = str(form.get("validate") or "").lower() in {"1", "true", "yes"}
+        if upload is None:
+            raise HTTPException(status_code=400, detail="Multipart bulk import requires a file field.")
+        raw = await upload.read()  # type: ignore[union-attr]
+        try:
+            data = json.loads(raw.decode("utf-8-sig"))
+        except (UnicodeDecodeError, json.JSONDecodeError, AttributeError) as exc:
+            raise HTTPException(status_code=400, detail="Bulk file must contain valid JSON.") from exc
+        if not isinstance(data, dict):
+            raise HTTPException(status_code=400, detail="Bulk file must be a JSON object.")
+        items, file_validate = _extract_bulk_profiles(data)
+        return items, do_validate or file_validate
+
+    try:
+        data = await request.json()
+    except Exception:
+        body = await request.body()
+        if not body:
+            raise HTTPException(status_code=400, detail="Provide a JSON body or bulk file upload.")
+        try:
+            data = json.loads(body.decode("utf-8-sig"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=400, detail="Provide a JSON body or bulk file upload.") from exc
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=400, detail="Bulk body must be a JSON object.")
+    return _extract_bulk_profiles(data)
+
+
 @router.get("")
 def get_cookie_profiles(session: Session = Depends(get_session)) -> list[dict]:
     return list_profiles(session)
@@ -74,6 +119,24 @@ async def import_cookie_profile(
     profile = create_profile(session, clean_name, daily_limit, parsed)
     await _validate_profile(session, profile, cookie_header)
     return profile_metadata(session, profile)
+
+
+@router.post("/import/bulk")
+async def import_cookie_profiles_bulk(request: Request, session: Session = Depends(get_session)) -> dict[str, Any]:
+    """Accept application/json body or multipart file (auto_dola_bulk_import.json)."""
+    items, do_validate = await _parse_bulk_request(request)
+    result = bulk_import_profiles(session, items, validate=False)
+    if do_validate:
+        for item in items:
+            name = str(item.get("name") or "").strip()
+            if not name:
+                continue
+            if any(f.get("name") == name for f in (result.failed or [])):
+                continue
+            profile = find_profile_by_name(session, name)
+            if profile:
+                await _validate_profile(session, profile, cookie_header_from_encrypted(profile.cookies_encrypted))
+    return result.as_dict()
 
 
 @router.put("/{profile_id}")
@@ -120,8 +183,6 @@ async def test_cookie_profile(profile_id: UUID, session: Session = Depends(get_s
     profile = session.get(DolaCookieProfile, profile_id)
     if not profile or profile.deleted_at:
         raise HTTPException(status_code=404, detail="Cookie profile not found.")
-    from app.services.cookie_profiles import cookie_header_from_encrypted
-
     await _validate_profile(session, profile, cookie_header_from_encrypted(profile.cookies_encrypted))
     return profile_metadata(session, profile)
 
